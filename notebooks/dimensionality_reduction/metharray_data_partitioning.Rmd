@@ -1,0 +1,537 @@
+---
+title: "Dimensionality reduction on 450k TCGA data"
+output: 
+  html_document:
+      code_folding: hide
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE, warning = FALSE, message = FALSE, cache = TRUE, cache.lazy = FALSE, fig.width = 8, fig.height = 4.5)
+
+here::i_am("notebooks/dimensionality_reduction/metharray_data_partitioning.Rmd")
+```
+
+```{r, echo = FALSE}
+library(tidyverse)
+library(here)
+library(meffil)
+library(readxl)
+library(umap)
+library(ggpubr)
+library(tsne)
+
+library(DRquality)
+```
+
+# Prepare training data
+
+## Tumour purity
+
+```{r}
+# Tumour purity estimates derived from 2015 Aran et al. Nat Comms paper (Systematic pan-cancer analysis of tumour purity)
+cellularity_aran <- read_excel(here::here("data", "references", "41467_2015_BFncomms9971_MOESM1236_ESM.xlsx"), skip = 3, col_types = c("text", "text", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric"))
+cellularity_aran <- cellularity_aran[,1:7]
+
+# Additional ESTIMATE tumour purity estimates for ESCA, not available through Aran et al.
+estimate_mdanderson_esca <- read_tsv(here::here("data", "references", "mdanderson_esca_estimate.tsv"))
+estimate_mdanderson_esca <- estimate_mdanderson_esca %>%
+  mutate(`Sample ID` = paste0(ID, "A"),
+         # https://www.nature.com/articles/ncomms3612 derived from an evolutionary algorithm
+         ESTIMATE=cos (0.6049872018+0.0001467884 * ESTIMATE_score)) %>%
+  dplyr::select(`Sample ID`, ESTIMATE)
+
+cellularity_merged <- cellularity_aran %>%
+  bind_rows(estimate_mdanderson_esca)
+
+write_tsv(cellularity_merged, here::here("results", "merged", "cellularity_merged.tsv"))
+```
+
+## Metadata
+
+Metadata from meffil. 
+
+```{r}
+set.seed(123456)
+
+metadata_chen <- read_csv(here::here("results", "Chen2020", "samplesheet.csv"))
+metadata_soareslima <- read_csv(here::here("results", "SoaresLima2021", "samplesheet.csv"))
+#metadata_shibata_anal <- read_csv(here::here("results", "Shibata2021_anal", "samplesheet.csv"))
+#metadata_shibata_cervical <- read_csv(here::here("results", "Shibata2021_cervical", "samplesheet.csv"))
+metadata_jurmeister <- read_csv(here::here("results", "Jurmeister2019", "samplesheet.csv"))
+metadata_lim <- read_csv(here::here("results", "Lim2016", "samplesheet.csv"))
+metadata_degliesposti <- read_csv(here::here("results", "DegliEsposti2017", "samplesheet.csv"))
+metadata_esca <- read_csv(here::here("results", "TCGA_ESCA", "samplesheet.csv"))
+metadata_lusc <- read_csv(here::here("results", "TCGA_LUSC", "samplesheet.csv"))
+metadata_hnsc <- read_csv(here::here("results", "TCGA_HNSC", "samplesheet.csv"))
+metadata_cesc <- read_csv(here::here("results", "TCGA_CESC", "samplesheet.csv"))
+metadata_blca <- read_csv(here::here("results", "TCGA_BLCA", "samplesheet.csv"))
+metadata_vgh <- read_csv(here::here("results", "VGH_Naso", "samplesheet.csv"))
+metadata_toronto <- read_csv(here::here("results", "Toronto", "samplesheet.csv"))
+
+metadata_merged <- bind_rows(
+  list(
+    metadata_chen %>% dplyr::mutate(cancer_type = "ESCA"),
+    metadata_soareslima %>% dplyr::mutate(cancer_type = "ESCA"),
+    #metadata_shibata_anal %>% dplyr::mutate(cancer_type = "ANSC"),
+    #metadata_shibata_cervical %>% dplyr::mutate(cancer_type = "CESC"),
+    metadata_jurmeister %>% dplyr::mutate(cancer_type = ifelse(
+      str_detect(primary_diagnosis, "lung"), 
+      "LUSC",
+      "HNSC")),
+    metadata_degliesposti %>% dplyr::mutate(cancer_type = "HNSC"),
+    metadata_lim %>% dplyr::mutate(cancer_type = "HNSC"),
+    metadata_esca %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                             days_to_birth = as.numeric(days_to_birth),
+                             age_at_diagnosis = as.numeric(age_at_diagnosis),
+                             cancer_type = "ESCA"),
+    metadata_lusc %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                             days_to_birth = as.numeric(days_to_birth),
+                             age_at_diagnosis = as.numeric(age_at_diagnosis),
+                             cancer_type = "LUSC"),
+    metadata_hnsc %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                             days_to_birth = as.numeric(days_to_birth),
+                             age_at_diagnosis = as.numeric(age_at_diagnosis),
+                             cancer_type = "HNSC"),
+    metadata_cesc %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                             days_to_birth = as.numeric(days_to_birth),
+                             age_at_diagnosis = as.numeric(age_at_diagnosis),
+                             cancer_type = "CESC",
+                             Sex = "F"),
+    metadata_blca %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                             days_to_birth = as.numeric(days_to_birth),
+                             age_at_diagnosis = as.numeric(age_at_diagnosis),
+                             cancer_type = "BLCA"),
+    metadata_vgh %>% dplyr::mutate(cancer_type = primary_diagnosis),
+    metadata_toronto %>% dplyr::mutate(Sample_ID = as.character(Sample_ID),
+                                       days_to_birth = as.numeric(days_to_birth),
+                                       cancer_type = primary_diagnosis)
+  )
+) %>%
+  dplyr::rename(
+    sample=`Sample_Name`
+  ) %>% 
+  dplyr::mutate(
+    `Sample Type`=ifelse(is.na(`Sample Type`), ifelse(str_detect(primary_diagnosis, "metastasis"), "Metastatic", "Primary Tumor"), `Sample Type`)
+  ) %>%
+  dplyr::select(
+    -c(Subtype1, Subtype2, Smoking)
+  ) %>%
+  left_join(cellularity_merged)
+
+metadata_merged_primary <- metadata_merged %>% 
+  filter(`Sample Type` == "Primary Tumor")
+metadata_merged_normal <- metadata_merged %>% 
+  filter(`Sample Type` == "Solid Tissue Normal")
+metadata_merged_met <- metadata_merged %>% 
+  filter(`Sample Type` == "Metastatic")
+```
+
+
+```{r}
+write_tsv(metadata_merged, here::here("results", "merged", "metadata_merged.tsv"))
+write_tsv(metadata_merged_primary, here::here("results", "merged", "metadata_merged_primary.tsv"))
+write_tsv(metadata_merged_normal, here::here("results", "merged", "metadata_merged_normal.tsv"))
+write_tsv(metadata_merged_met, here::here("results", "merged", "metadata_merged_metastatic.tsv"))
+```
+
+## Beta values
+
+Normalized beta values from meffil. 
+
+```{r}
+# beta_chen <- readRDS(here::here("results", "Chen2020", "norm_beta.rds"))
+# beta_soareslima <- readRDS(here::here("results", "SoaresLima2021", "norm_beta.rds"))
+# #beta_shibata_anal <- readRDS(here::here("results", "Shibata2021_anal", "norm_beta.rds"))
+# #beta_shibata_cervical <- readRDS(here::here("results", "Shibata2021_cervical", "norm_beta.rds"))
+# beta_jurmeister <- readRDS(here::here("results", "Jurmeister2019", "norm_beta.rds"))
+# beta_lim <- readRDS(here::here("results", "Lim2016", "norm_beta.rds"))
+# beta_degliesposti <- readRDS(here::here("results", "DegliEsposti2017", "norm_beta.rds"))
+# beta_esca <- readRDS(here::here("results", "TCGA_ESCA", "norm_beta.rds"))
+# beta_lusc <- readRDS(here::here("results", "TCGA_LUSC", "norm_beta.rds"))
+# beta_hnsc <- readRDS(here::here("results", "TCGA_HNSC", "norm_beta.rds"))
+# beta_cesc <- readRDS(here::here("results", "TCGA_CESC", "norm_beta.rds"))
+# beta_blca <- readRDS(here::here("results", "TCGA_BLCA", "norm_beta.rds"))
+
+included_projs <- c("Chen2020", "SoaresLima2021", "Jurmeister2019", "Lim2016", "DegliEsposti2017",
+                    "TCGA_ESCA", "TCGA_LUSC", "TCGA_HNSC", "TCGA_CESC", "TCGA_BLCA", "VGH_Naso", "Toronto")
+
+beta_list <- lapply(included_projs, function(x) {
+  readRDS(here::here("results", x, "norm_beta.rds"))
+})
+
+M_list <- lapply(included_projs, function(x) {
+  readRDS(here::here("results", x, "norm_M.rds"))
+})
+```
+
+
+
+```{r}
+# Common probes between all (i.e. good quality probes)
+common_sites <- purrr::reduce(lapply(beta_list, rownames), 
+                       intersect)
+```
+
+```{r}
+betas_merged <- purrr::reduce(
+  lapply(beta_list, function(x) x[common_sites,])
+, cbind)
+
+M_merged <- purrr::reduce(
+  lapply(M_list, function(x) x[common_sites,])
+, cbind)
+
+dim(betas_merged)
+```
+
+
+
+```{r}
+saveRDS(betas_merged, here::here("results", "merged", "betas_merged.rds"))
+saveRDS(M_merged, here::here("results", "merged", "M_merged.rds"))
+```
+
+```{r}
+# Remove sex chromosome data
+autosomal_sites <- meffil.get.autosomal.sites("450k:epic:epic2")
+
+# Consider 'pure' samples to reduce variability: this should be tested at different values
+# This is applied only to TCGA samples, as cellularity is >70% for all of Jurmeister, and not known for the other two cohorts of HNSC
+cellularity_threshold <- 0.7
+
+pure_metadata <- metadata_merged_primary %>%
+  dplyr::filter(sample %in% colnames(betas_merged), 
+         ifelse(!is.na(ESTIMATE), ESTIMATE > cellularity_threshold, TRUE))
+```
+
+
+# Partitioning of train/test sets
+
+We'll also analyze different subsets that may be used in different downstream analyses. 
+
+## Classifier analysis
+
+Note: Consider doing cross-validation on the training set (test set will still be held out).
+
+```{r}
+train_proportion <- 0.7
+test_proportion <- 1 - train_proportion
+```
+
+The classifier analysis will be run on the full data (all cancer types), using `r train_proportion` of the data as training and the remaining `r test_proportion` to test. 
+
+```{r}
+set.seed(123456)
+
+# Stratified sampling by cancer type
+train_metadata <- pure_metadata %>%
+  # Segregate Toronto samples to the test set
+  dplyr::filter(!`Project ID` %in% c("IMPACT")) %>%
+  group_by(cancer_type) %>%
+  sample_frac(size = .7) %>%
+  ungroup()
+
+test_metadata <- pure_metadata %>%
+  # sample is a unique identifier, so this is OK
+  filter(!sample %in% train_metadata$sample)
+
+betas_train <- betas_merged[,train_metadata$sample]
+betas_test <- betas_merged[,test_metadata$sample]
+betas_normal <- betas_merged[,metadata_merged_normal$sample]
+betas_met <- betas_merged[,metadata_merged_met$sample]
+```
+
+Feature selection based on training data. 
+
+```{r}
+# Try at multiple values
+num_variable_sites <- 50000
+
+## Select variable sites based on training data only
+# The output here is ORDERED by variability, so that's good in case we want to restrict more downstream
+variable_sites_classifier <- meffil.most.variable.cpgs(
+  betas_train, n = num_variable_sites, sites = autosomal_sites, samples = NULL, autosomal = TRUE,
+  winsorize.pct = NA, outlier.iqr.factor = NA
+)
+
+## Select most discriminatory CpGs by EWAS (limma-based)
+# Set seed to ensure reproducibility
+# set.seed(123456)
+# ewas_coefficients <- lapply(unique(train_metadata$cancer_type), function(x) {
+#   df <- train_metadata %>%
+#     mutate(cancer_type = ifelse(cancer_type == x, x, "other")) %>%
+#     mutate(cancer_type = factor(cancer_type, levels = c("other", x)))
+#   
+#   ewas_ret <- meffil.ewas(
+#     betas_train,
+#     variable = factor(df$cancer_type),
+#     covariates = NULL,
+#     isva = FALSE
+#   )
+#   
+#   sva_coefficients <- ewas_ret$coefficient %>% 
+#     as_tibble(rownames = NA) %>%
+#     dplyr::arrange(-sva) %>%
+#     dplyr::mutate(cancer_type = x)
+#   
+#   return(sva_coefficients)
+# }) %>% bind_rows()
+
+## TODO: EWAS most discriminatory CpG-based feature selection
+```
+
+```{r}
+write_tsv(train_metadata, here::here("results", "classifier", "train", "metadata.tsv"))
+write_tsv(test_metadata, here::here("results", "classifier", "test", "metadata.tsv"))
+write_tsv(metadata_merged_normal, here::here("results", "classifier", "test", "metadata_normal.tsv"))
+write_tsv(metadata_merged_met, here::here("results", "classifier", "test", "metadata_met.tsv"))
+
+saveRDS(betas_train[variable_sites_classifier,], here::here("results", "classifier", "train", "beta.rds"))
+saveRDS(betas_test[variable_sites_classifier,], here::here("results", "classifier", "test", "beta.rds"))
+saveRDS(betas_normal[variable_sites_classifier,], here::here("results", "classifier", "test", "beta_normal.rds"))
+saveRDS(betas_met[variable_sites_classifier,], here::here("results", "classifier", "test", "beta_met.rds"))
+```
+
+## TCGA normal data
+
+```{r}
+included_projs_normal <- c("TCGA_ESCA_normal", "TCGA_LUSC_normal", "TCGA_HNSC_normal", "TCGA_CESC_normal", "TCGA_BLCA_normal")
+
+beta_normal_list <- lapply(included_projs_normal, function(x) 
+  readRDS(here::here("results", x, "norm_beta.rds"))
+)
+
+M_normal_list <- lapply(included_projs_normal, function(x) {
+  readRDS(here::here("results", x, "norm_M.rds"))
+})
+```
+
+```{r}
+betas_normal_merged <- reduce(
+  lapply(beta_normal_list, function(x) x[common_sites,]), 
+  cbind)
+
+M_normal_merged <- reduce(
+  lapply(M_normal_list, function(x) x[common_sites,]), 
+  cbind)
+
+saveRDS(betas_normal_merged, here::here("results", "merged", "betas_normal_merged.rds"))
+saveRDS(M_normal_merged, here::here("results", "merged", "M_normal_merged.rds"))
+
+metadata_esca_normal <- read_csv(here::here("results", "TCGA_ESCA_normal", "samplesheet.csv"))
+metadata_lusc_normal <- read_csv(here::here("results", "TCGA_LUSC_normal", "samplesheet.csv"))
+metadata_hnsc_normal <- read_csv(here::here("results", "TCGA_HNSC_normal", "samplesheet.csv"))
+metadata_cesc_normal <- read_csv(here::here("results", "TCGA_CESC_normal", "samplesheet.csv"))
+metadata_blca_normal <- read_csv(here::here("results", "TCGA_BLCA_normal", "samplesheet.csv"))
+
+metadata_normal_merged <- bind_rows(
+  list(
+    metadata_esca_normal %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                                           days_to_birth = as.numeric(days_to_birth),
+                                           age_at_diagnosis = as.numeric(age_at_diagnosis),
+                                           cancer_type = "ESCA",
+                                           Sex = "F"),
+    metadata_lusc_normal %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                                           days_to_birth = as.numeric(days_to_birth),
+                                           age_at_diagnosis = as.numeric(age_at_diagnosis),
+                                           cancer_type = "LUSC"),
+    metadata_hnsc_normal %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                                           days_to_birth = as.numeric(days_to_birth),
+                                           age_at_diagnosis = as.numeric(age_at_diagnosis),
+                                           cancer_type = "HNSC"),
+    metadata_cesc_normal %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                                           days_to_birth = as.numeric(days_to_birth),
+                                           age_at_diagnosis = as.numeric(age_at_diagnosis),
+                                           cancer_type = "CESC",
+                                           Sex = "F"),
+    metadata_blca_normal %>% dplyr::mutate(age_at_index = as.numeric(age_at_index),
+                                           days_to_birth = as.numeric(days_to_birth),
+                                           age_at_diagnosis = as.numeric(age_at_diagnosis),
+                                           cancer_type = "BLCA")
+  )
+) %>%
+  dplyr::rename(
+    sample=`Sample_Name`
+  )
+
+write_tsv(metadata_normal_merged, here::here("results", "merged", "metadata_normal_merged.tsv"))
+```
+
+# OLD BELOW 
+
+## Out of distribution (OOD) analysis
+
+This analysis will determine whether we can predict whether a cancer type not previously seen in training is being shown to the model.
+
+Conventional neural networks may not do this well, as they tend to predict wrong classes with overconfidence, especially when only given a small number of options to choose from (compare to say, the brain methylation atlas). 
+
+```{r}
+cancer_types_indist <- c("LUSC", "HNSC", "BLCA", "ESCA", "ANSC")
+# We select CESC, instead of ESCA, as testing due to previously reported similarity between ESCA and HNSC that makes them difficult to distinguish (is this due to HPV? will require more analysis as to why it's not the same with cervix, e.g. HPV genotype vs pre-existing site-specific differences)
+cancer_types_oodist <- c("CESC")
+```
+
+```{r}
+oog_train_indist_metadata <- train_metadata %>%
+  filter(cancer_type %in% cancer_types_indist)
+
+oog_test_indist_metadata <- test_metadata %>%
+  filter(cancer_type %in% cancer_types_indist)
+
+## For some methods, we may consider training on out-of-distribution samples
+oog_train_oodist_metadata <- train_metadata %>%
+  filter(cancer_type %in% cancer_types_oodist)
+
+oog_test_oodist_metadata <- pure_metadata %>%
+  filter(cancer_type %in% cancer_types_oodist)
+
+oog_betas_train_indist <- betas_merged[,oog_train_indist_metadata$sample]
+oog_betas_test_indist <- betas_merged[,oog_test_indist_metadata$sample]
+oog_betas_train_oodist <- betas_merged[,oog_train_oodist_metadata$sample]
+oog_betas_test_oodist <- betas_merged[,oog_test_oodist_metadata$sample]
+```
+
+Feature selection based on training data. 
+
+```{r}
+num_variable_sites <- 50000
+
+# We could give the methods that will use oodist to train all the data for variable site selection ... but that'll be more complicated to implement
+variable_sites_oog <- meffil.most.variable.cpgs(
+  oog_betas_train_indist, n = num_variable_sites, sites = autosomal_sites, samples = NULL, autosomal = TRUE,
+  winsorize.pct = NA, outlier.iqr.factor = NA
+)
+```
+
+```{r}
+write_tsv(oog_train_indist_metadata, here::here("results", "oog", "train_indist", "metadata.tsv"))
+write_tsv(oog_test_indist_metadata, here::here("results", "oog", "test_indist", "metadata.tsv"))
+write_tsv(oog_train_oodist_metadata, here::here("results", "oog", "train_oodist", "metadata.tsv"))
+write_tsv(oog_test_oodist_metadata, here::here("results", "oog", "test_oodist", "metadata.tsv"))
+
+
+saveRDS(oog_betas_train_indist[variable_sites_oog,], here::here("results", "oog", "train_indist", "beta.rds"))
+saveRDS(oog_betas_test_indist[variable_sites_oog,], here::here("results", "oog", "test_indist", "beta.rds"))
+saveRDS(oog_betas_train_oodist[variable_sites_oog,], here::here("results", "oog", "train_oodist", "beta.rds"))
+saveRDS(oog_betas_test_oodist[variable_sites_oog,], here::here("results", "oog", "test_oodist", "beta.rds"))
+```
+
+
+# Dimensionality reduction
+
+```{r}
+# Computes PCs to get TSNE and UMAP results
+compute_dimred <- function(x) {
+  ret <- prcomp(t(x))
+  pcs_merged <- ret$x 
+  
+  umap_res <- umap(pcs_merged[,1:50])
+  umap_df <- umap_res$layout
+  colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+  umap_df <- umap_df %>%
+    as_tibble(rownames = NA) %>%
+    rownames_to_column(var = "sample")
+  
+  # May be sensitive to hyperparameters; needs tuning (TODO)
+  tsne_res <- tsne(pcs_merged[,1:50], perplexity = 10)
+  rownames(tsne_res) <- rownames(pcs_merged)
+  colnames(tsne_res) <- c("TSNE_1", "TSNE_2")
+  tsne_df <- tsne_res %>%
+    as_tibble(rownames = NA) %>%
+    rownames_to_column(var = "sample")
+  
+  dimred_df <- umap_df %>%
+    left_join(tsne_df)
+  return(list(dimred=dimred_df, pc_result=ret))
+}
+```
+
+## All samples
+
+```{r}
+num_variable_sites <- 50000
+
+## Select variable sites
+variable_sites_all <- meffil.most.variable.cpgs(
+  betas_merged, n = num_variable_sites, sites = autosomal_sites, samples = NULL, autosomal = TRUE,
+  winsorize.pct = NA, outlier.iqr.factor = NA
+)
+
+dimred_all_res <- compute_dimred(betas_merged[variable_sites_all,])
+dimred_all_df <- dimred_all_res$dimred %>%
+  left_join(metadata_merged)
+```
+
+```{r, fig.height = 14, fig.width = 14}
+p1 <- ggplot(dimred_all_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=cancer_type)) + 
+  theme_pubr()
+p2 <- ggplot(dimred_all_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=`Project ID`)) + 
+  theme_pubr()
+p3 <- ggplot(dimred_all_df, aes(x=TSNE_1, y=TSNE_2)) + 
+  geom_point(aes(colour=cancer_type)) + 
+  theme_pubr()
+p4 <- ggplot(dimred_all_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=ESTIMATE)) + 
+  theme_pubr() + 
+  scale_colour_distiller(palette = "Spectral", type = "seq")
+p5 <- ggplot(dimred_all_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=IHC)) + 
+  theme_pubr() + 
+  scale_colour_distiller(palette = "Spectral", type = "seq")
+p6 <- ggplot(dimred_all_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=CPE)) + 
+  theme_pubr() 
+
+dimred_allsamples_plot <- cowplot::plot_grid(p1, p2, p3, p4, p5, p6, ncol = 2)
+
+dimred_allsamples_plot
+```
+
+We see:
+
+* Admixture of ESCA with HNSC
+* Some admixture of HNSC with LUSC and CESC
+
+A more detailed analysis of the HNSC samples clustering with CESC may be useful (i.e. are these HPV related, as opposed to those with more smoking/EtOH related effects)?
+
+One paper that has done something for all TCGA cancer types/sites of origin described difficulty with ESCA vs HNSC (https://academic.oup.com/narcancer/article/5/2/zcad017/7129336), and in fact they ended up treating this as one type in their classifier. It's unclear why this is; perhaps similar etiology or similar site (pharynx/hypopharynx vs upper esophagus). May be worth seeing whether hypopharyngeal samples are more similar to esophageal. TODO. 
+
+There is evidence that most synchronous and metachronous ESCA and HNSC are NOT clonally related, so they likely do not represent metastatic spread/seeding. 
+
+## OOG training samples
+
+```{r}
+dimred_oog_res <- compute_dimred(oog_betas_train_indist[variable_sites_oog,])
+dimred_oog_df <- dimred_oog_res$dimred %>%
+  left_join(metadata_merged)
+```
+
+TODO: Implement something that allows for mapping onto t-SNE/UMAP, e.g. parametric t-SNE, using the PCA mapping stored in the dimred result.
+
+```{r, fig.height = 12, fig.width = 10}
+p1 <- ggplot(dimred_oog_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=cancer_type)) + 
+  theme_pubr()
+p2 <- ggplot(dimred_oog_df, aes(x=TSNE_1, y=TSNE_2)) + 
+  geom_point(aes(colour=cancer_type)) + 
+  theme_pubr()
+p3 <- ggplot(dimred_oog_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=ESTIMATE)) + 
+  theme_pubr() + 
+  scale_colour_distiller(palette = "Spectral", type = "seq")
+p4 <- ggplot(dimred_oog_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=IHC)) + 
+  theme_pubr() + 
+  scale_colour_distiller(palette = "Spectral", type = "seq")
+p5 <- ggplot(dimred_oog_df, aes(x=UMAP_1, y=UMAP_2)) + 
+  geom_point(aes(colour=CPE)) + 
+  theme_pubr() 
+
+dimred_oog_plot <- cowplot::plot_grid(p1, p2, p3, p4, p5, ncol = 2)
+
+dimred_oog_plot
+```

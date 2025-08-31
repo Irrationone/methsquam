@@ -1,0 +1,120 @@
+---
+title: "Differential methylation (time-consuming portion)"
+---
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(umap)
+
+library(limma)
+library(missMethyl)
+library(mCSEA)
+
+here::i_am("paper/notebooks/limma-enrichment.qmd")
+```
+
+<!-- {{< include _data.qmd >}} -->
+
+```{r, eval = FALSE}
+primary_metadata <- combined_metadata %>%
+  dplyr::filter(`Sample Type` == "Primary Tumor") %>%
+  dplyr::left_join(sample_annotation %>% rownames_to_column("sample") %>% dplyr::select(sample, hclust))
+
+normal_metadata <- combined_metadata %>%
+  dplyr::filter(`Sample Type` == "Solid Tissue Normal")
+
+betas_cancer <- readRDS(here::here("results", "merged", "betas_merged.rds"))[,primary_metadata$sample]
+betas_normal <- readRDS(here::here("results", "merged", "betas_merged.rds"))[,normal_metadata$sample]
+
+M_cancer <- readRDS(here::here("results", "merged", "M_merged.rds"))[,primary_metadata$sample]
+M_normal <- readRDS(here::here("results", "merged", "M_merged.rds"))[,normal_metadata$sample]
+```
+
+## Cancer
+
+```{r, eval = FALSE}
+design_cancer <- model.matrix(~ 0+cancer_type+hclust, data = primary_metadata) 
+colnames(design_cancer) <- str_replace_all(colnames(design_cancer), "(cancer_type|hclust)", "") %>%
+  str_replace_all("\\-", "_")
+
+# Contrasts, picked by likely relevance
+contMatrix <- makeContrasts(BLCA-(CESC+ESCA+HNSC+LUSC)/4,
+                            CESC-(BLCA+ESCA+HNSC+LUSC)/4,
+                            ESCA-(BLCA+CESC+HNSC+LUSC)/4,
+                            HNSC-(BLCA+CESC+ESCA+LUSC)/4,
+                            LUSC-(BLCA+CESC+ESCA+HNSC)/4,
+                            levels=design_cancer)
+
+fit <- lmFit(M_cancer, design_cancer)
+fit2 <- contrasts.fit(fit, contMatrix)
+fit_cancer <- eBayes(fit2, robust = TRUE)
+
+saveRDS(fit_cancer, file = here::here("results", "diff_methyl", "limma_fit_cancer.rds"))
+```
+
+
+```{r, eval = FALSE}
+coefs_to_analyze <- list("LUSC"="LUSC - (BLCA + CESC + ESCA + HNSC)/4",
+                         "BLCA"="BLCA - (CESC + ESCA + HNSC + LUSC)/4",
+                         "CESC"="CESC - (BLCA + ESCA + HNSC + LUSC)/4",
+                         "ESCA"="ESCA - (BLCA + CESC + HNSC + LUSC)/4",
+                         "HNSC"="HNSC - (BLCA + CESC + ESCA + LUSC)/4")
+
+ann450kSub <- ann450k[match(rownames(M_cancer),ann450k$Name),
+                      c(1:4,12:19,24:ncol(ann450k))]
+
+dmps_cancer <- lapply(names(coefs_to_analyze), function(coef_name) {
+  coef_formula <- coefs_to_analyze[[coef_name]]
+  print(coef_formula)
+  DMPs <- topTable(fit_cancer, num=Inf, coef=coef_formula, genelist=ann450kSub)
+  DMPs$coef_name <- coef_name
+  return(DMPs)
+})
+names(dmps_cancer) <- coefs_to_analyze
+
+dmps_cancer_merged <- bind_rows(dmps_cancer %>% lapply(function(x) x %>% rownames_to_column("probe")))
+
+write_tsv(dmps_cancer_merged, file = here::here("results", "diff_methyl", "dmps_cancer_merged.tsv"))
+```
+
+## Normal
+
+```{r, eval = FALSE}
+design_normal <- model.matrix(~ 0+cancer_type, data = normal_metadata) 
+colnames(design_normal) <- str_replace_all(colnames(design_normal), "(cancer_type)", "") %>%
+  str_replace_all("\\-", "_")
+
+# Contrasts, picked by likely relevance
+contMatrix <- makeContrasts(BLCA-(CESC+ESCA+HNSC+LUSC)/4,
+                            CESC-(BLCA+ESCA+HNSC+LUSC)/4,
+                            ESCA-(BLCA+CESC+HNSC+LUSC)/4,
+                            HNSC-(BLCA+CESC+ESCA+LUSC)/4,
+                            LUSC-(BLCA+CESC+ESCA+HNSC)/4,
+                            levels=design_normal)
+
+fit <- lmFit(M_normal, design_normal)
+fit2 <- contrasts.fit(fit, contMatrix)
+fit_normal <- eBayes(fit2, robust = TRUE)
+
+saveRDS(fit_normal, file = here::here("results", "diff_methyl", "limma_fit_normal.rds"))
+```
+
+
+```{r, eval = FALSE}
+dmps_normal <- lapply(names(coefs_to_analyze), function(coef_name) {
+  coef_formula <- coefs_to_analyze[[coef_name]]
+  print(coef_formula)
+  DMPs <- topTable(fit_normal, num=Inf, coef=coef_formula, genelist=ann450kSub)
+  DMPs$coef_name <- coef_name
+  return(DMPs)
+})
+names(dmps_normal) <- coefs_to_analyze
+
+dmps_normal_merged <- bind_rows(dmps_normal %>% lapply(function(x) x %>% rownames_to_column("probe")))
+
+write_tsv(dmps_normal_merged, file = here::here("results", "diff_methyl", "dmps_normal_merged.tsv"))
+```
+
+

@@ -1,0 +1,329 @@
+---
+title: "Differential methylation"
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(cowplot)
+library(here)
+
+library(limma)
+library(missMethyl)
+library(mCSEA)
+library(ggrepel)
+```
+
+{{< include unsupervised-plot.qmd >}}
+
+```{r}
+here::i_am("paper/notebooks/differential-methylation.qmd")
+```
+
+## Cancer samples
+
+Pull from unsupervised clustering. 
+
+```{r}
+primary_metadata <- combined_metadata %>%
+  dplyr::filter(`Sample Type` == "Primary Tumor") %>%
+  dplyr::left_join(sample_annotation %>% rownames_to_column("sample") %>% dplyr::select(sample, hclust))
+
+normal_metadata <- combined_metadata %>%
+  dplyr::filter(`Sample Type` == "Solid Tissue Normal") %>%
+  dplyr::left_join(sample_annotation %>% rownames_to_column("sample") %>% dplyr::select(sample, hclust))
+```
+
+```{r}
+betas_cancer <- readRDS(here::here("results", "merged", "betas_merged.rds"))[,primary_metadata$sample]
+betas_normal <- readRDS(here::here("results", "merged", "betas_merged.rds"))[,normal_metadata$sample]
+
+M_cancer <- readRDS(here::here("results", "merged", "M_merged.rds"))[,primary_metadata$sample]
+M_normal <- readRDS(here::here("results", "merged", "M_merged.rds"))[,normal_metadata$sample]
+```
+
+```{r}
+coefs_to_analyze <- c("LUSC - (BLCA + CESC + ESCA + HNSC)/4",
+                      "BLCA - (CESC + ESCA + HNSC + LUSC)/4",
+                      "CESC - (BLCA + ESCA + HNSC + LUSC)/4",
+                      "ESCA - (BLCA + CESC + HNSC + LUSC)/4",
+                      "HNSC - (BLCA + CESC + ESCA + LUSC)/4")
+```
+
+```{r}
+dmps_cancer_merged <- read_tsv(here::here("results", "diff_methyl", "dmps_cancer_merged.tsv"))
+```
+
+## Normal samples
+
+```{r}
+dmps_normal_merged <- read_tsv(here::here("results", "diff_methyl", "dmps_normal_merged.tsv"))
+```
+
+```{r}
+# design_normal <- model.matrix(~ 0+cancer_type, data = normal_metadata) 
+# colnames(design_normal) <- str_replace_all(colnames(design_normal), "(cancer_type)", "") %>%
+#   str_replace_all("\\-", "_")
+# 
+# # Contrasts, picked by likely relevance
+# contMatrix <- makeContrasts(BLCA-(CESC+ESCA+HNSC+LUSC)/4,
+#                             CESC-(BLCA+ESCA+HNSC+LUSC)/4,
+#                             ESCA-(BLCA+CESC+HNSC+LUSC)/4,
+#                             HNSC-(BLCA+CESC+ESCA+LUSC)/4,
+#                             LUSC-(BLCA+CESC+ESCA+HNSC)/4,
+#                             LUSC-HNSC,
+#                             ESCA-HNSC,
+#                             CESC-HNSC,
+#                             LUSC-ESCA,
+#                             CESC-LUSC,
+#                             BLCA-LUSC,
+#                             BLCA-CESC,
+#                             levels=design_normal)
+# 
+# fit <- lmFit(M_normal, design_normal)
+# fit2 <- contrasts.fit(fit, contMatrix)
+# fit_normal <- eBayes(fit2, robust = TRUE)
+# 
+# 
+# dmps_normal <- lapply(coefs_to_analyze, function(coef_formula) {
+#   print(coef_formula)
+#   DMPs <- topTable(fit_normal, num=Inf, coef=coef_formula, genelist=ann450kSub)
+#   return(DMPs)
+# })
+# names(dmps_normal) <- coefs_to_analyze
+```
+
+
+## Scatterplot of normal versus cancer normalized enrichment scores
+
+
+
+```{r}
+num_probes_per_cancertype <- 20
+# Note that there are some duplicated probes between cancer types, e.g. if more than one cancer type finds a particular probe important
+
+shap_cancertype <- shap_values_long %>%
+  dplyr::group_by(cancer_type) %>%
+  dplyr::slice_max(shap, n = num_probes_per_cancertype) %>%
+  ungroup()
+
+# shap_cancertype_promoter <- shap_cancertype %>%
+#   dplyr::left_join(cpg_450k_metadata) %>%
+#   dplyr::filter(region_type == "Promoter")
+```
+
+
+
+
+```{r}
+normal_df <- dmps_normal_merged %>%
+  dplyr::select(probe, adj.P.Val, logFC, coef_name) %>%
+  dplyr::rename(
+    adj.P.Val_normal=adj.P.Val,
+    logFC_normal=logFC
+  )
+
+cancer_df <- dmps_cancer_merged %>%
+  dplyr::select(probe, adj.P.Val, logFC, coef_name) %>%
+  dplyr::mutate(tumor="Cancer")
+
+logfc_comparison <- normal_df %>%
+  full_join(cancer_df)
+
+logfc_comparison <- logfc_comparison %>%
+  dplyr::mutate(
+    important = (probe %in% shap_cancertype$probe)
+  )
+```
+
+```{r, fig.width = 10, fig.height = 8}
+#| label: suppfig-logfc-scatterplot
+ggplot() + 
+  geom_point(data = logfc_comparison %>% dplyr::filter(!important), aes(x=logFC, y=logFC_normal, colour = coef_name), alpha = 0.02) + 
+  geom_point(data = logfc_comparison %>% dplyr::filter(important), aes(x=logFC, y=logFC_normal), colour = "red", alpha = 0.5) + 
+  theme_pubr(legend = "right") + 
+  facet_wrap(~ coef_name, ncol = 2) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) + 
+  stat_cor(data = logfc_comparison, aes(x=logFC, y=logFC_normal, colour = important), method = "pearson") + 
+  xlab("logFC in cancer") + 
+  ylab("logFC in normal") + 
+  guides(colour = FALSE)
+```
+
+```{r}
+# design_cancer <- model.matrix(~ 0+cancer_type+hclust, data = primary_metadata) 
+# colnames(design_cancer) <- str_replace_all(colnames(design_cancer), "(cancer_type|hclust)", "") %>%
+#   str_replace_all("\\-", "_")
+# 
+# # Contrasts, picked by likely relevance
+# contMatrix <- makeContrasts(BLCA-(CESC+ESCA+HNSC+LUSC)/4,
+#                             CESC-(BLCA+ESCA+HNSC+LUSC)/4,
+#                             ESCA-(BLCA+CESC+HNSC+LUSC)/4,
+#                             HNSC-(BLCA+CESC+ESCA+LUSC)/4,
+#                             LUSC-(BLCA+CESC+ESCA+HNSC)/4,
+#                             LUSC-HNSC,
+#                             ESCA-HNSC,
+#                             CESC-HNSC,
+#                             LUSC-ESCA,
+#                             CESC-LUSC,
+#                             BLCA-LUSC,
+#                             BLCA-CESC,
+#                             levels=design_cancer)
+# 
+# fit <- lmFit(M_cancer, design_cancer)
+# fit2 <- contrasts.fit(fit, contMatrix)
+# fit_cancer <- eBayes(fit2, robust = TRUE)
+# 
+# dmps_cancer <- lapply(coefs_to_analyze, function(coef_formula) {
+#   print(coef_formula)
+#   DMPs <- topTable(fit_cancer, num=Inf, coef=coef_formula, genelist=ann450kSub)
+#   return(DMPs)
+# })
+# names(dmps_cancer) <- coefs_to_analyze
+```
+
+
+
+
+
+<!-- ```{r} -->
+<!-- #| output: false -->
+
+<!-- coefs_to_analyze <- c("LUSC - HNSC", -->
+<!--                       ## To show ?SOX2 and potential other -->
+<!--                       "LUSC - (BLCA + CESC + ESCA + HNSC)/4", -->
+<!--                       ## To show GATA3 -->
+<!--                       "BLCA - (CESC + ESCA + HNSC + LUSC)/4", -->
+<!--                       "CESC - (BLCA + ESCA + HNSC + LUSC)/4", -->
+<!--                       "ESCA - (BLCA + CESC + HNSC + LUSC)/4", -->
+<!--                       "HNSC - (BLCA + CESC + ESCA + LUSC)/4") -->
+
+<!-- ann450kSub <- ann450k[match(rownames(M_cancer),ann450k$Name), -->
+<!--                       c(1:4,12:19,24:ncol(ann450k))] -->
+
+<!-- dmps_cancer <- lapply(coefs_to_analyze, function(coef_formula) { -->
+<!--   print(coef_formula) -->
+<!--   DMPs <- topTable(fit_cancer, num=Inf, coef=coef_formula, genelist=ann450kSub) -->
+<!--   return(DMPs) -->
+<!-- }) -->
+<!-- names(dmps_cancer) <- coefs_to_analyze -->
+
+<!-- dmrs_cancer <- lapply(dmps_cancer, function(DMPs) { -->
+<!--   myRank <- DMPs$logFC -->
+<!--   names(myRank) <- rownames(DMPs) -->
+
+<!--   # Reshape the phenotype data to a format suitable for mCSEA -->
+<!--   pheno <- primary_metadata[,c("cancer_type", "hclust"), drop=FALSE] %>% as.data.frame -->
+<!--   rownames(pheno) <- primary_metadata$sample -->
+
+<!--   # Run the mCSEA -->
+<!--   DMRs <- mCSEATest(myRank, -->
+<!--                     betas_cancer, -->
+<!--                     pheno, -->
+<!--                     regionsTypes = "promoters", -->
+<!--                     platform = "450k") -->
+<!--   return(DMRs) -->
+<!-- }) -->
+
+<!-- dmrs_cancer_promoter <- lapply(dmrs_cancer, function(x) { -->
+<!--   df <- x$promoters %>% -->
+<!--     dplyr::mutate( -->
+<!--       signif = (abs(NES) >= 2 & padj < 1e-10) -->
+<!--     ) %>% -->
+<!--     rownames_to_column("gene") -->
+<!--   return(df) -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- volcano_plots_cancer <- lapply(dmrs_cancer_promoter, function(x) { -->
+<!--   ggplot() +  -->
+<!--     geom_point(data = x %>% filter(!signif), aes(x=NES, y=-log10(padj)), alpha = 0.02) +  -->
+<!--     geom_point(data = x %>% filter(signif), aes(x=NES, y=-log10(padj)), alpha = 0.5, colour = "red") + -->
+<!--     geom_text_repel(data = x %>% filter(signif), aes(x=NES, y=-log10(padj), label = gene)) +  -->
+<!--     theme_pubr() +  -->
+<!--     theme(plot.title = element_text(hjust = 0.5)) + -->
+<!--     xlab("Normalized enrichment score") +  -->
+<!--     ylab("-log10(Adjusted P value)") -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- ```{r, fig.width = 12, fig.height = 14} -->
+<!-- #| label: suppfig-volcano-cancer -->
+<!-- plot_grid(volcano_plots_cancer[["BLCA - (CESC + ESCA + HNSC + LUSC)/4"]] + ggtitle("Bladder vs rest"), -->
+<!--           volcano_plots_cancer[["HNSC - (BLCA + CESC + ESCA + LUSC)/4"]] + ggtitle("H&N vs rest"), -->
+<!--           volcano_plots_cancer[["ESCA - (BLCA + CESC + HNSC + LUSC)/4"]] + ggtitle("Esophagus vs rest"), -->
+<!--           volcano_plots_cancer[["LUSC - (BLCA + CESC + ESCA + HNSC)/4"]] + ggtitle("Lung vs rest"), -->
+<!--           volcano_plots_cancer[["CESC - (BLCA + ESCA + HNSC + LUSC)/4"]] + ggtitle("Cervix vs rest"), -->
+<!--           volcano_plots_cancer[["LUSC - HNSC"]] + ggtitle("Lung vs H&N"), -->
+<!--           ncol = 2, labels = "auto") -->
+<!-- ``` -->
+
+
+
+
+
+
+<!-- ```{r} -->
+
+<!-- dmrs_normal <- lapply(dmps_normal, function(DMPs) { -->
+<!--   myRank <- DMPs$logFC -->
+<!--   names(myRank) <- rownames(DMPs) -->
+
+<!--   # Reshape the phenotype data to a format suitable for mCSEA -->
+<!--   pheno <- normal_metadata[,c("cancer_type"), drop=FALSE] %>% as.data.frame -->
+<!--   rownames(pheno) <- normal_metadata$sample -->
+
+<!--   # Run the mCSEA -->
+<!--   DMRs <- mCSEATest(myRank, -->
+<!--                     betas_normal, -->
+<!--                     pheno, -->
+<!--                     regionsTypes = "promoters", -->
+<!--                     platform = "450k") -->
+<!--   return(DMRs) -->
+<!-- }) -->
+
+
+<!-- dmrs_normal_promoter <- lapply(dmrs_normal, function(x) { -->
+<!--   df <- x$promoters %>% -->
+<!--     dplyr::mutate( -->
+<!--       signif = (abs(NES) >= 2 & padj < 1e-10) -->
+<!--     ) %>% -->
+<!--     rownames_to_column("gene") -->
+<!--   return(df) -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- volcano_plots_normal <- lapply(dmrs_normal_promoter, function(x) { -->
+<!--   ggplot() +  -->
+<!--     geom_point(data = x %>% filter(!signif), aes(x=NES, y=-log10(padj)), alpha = 0.02) +  -->
+<!--     geom_point(data = x %>% filter(signif), aes(x=NES, y=-log10(padj)), alpha = 0.5, colour = "red") + -->
+<!--     geom_text_repel(data = x %>% filter(signif), aes(x=NES, y=-log10(padj), label = gene)) +  -->
+<!--     theme_pubr() +  -->
+<!--     theme(plot.title = element_text(hjust = 0.5)) + -->
+<!--     xlab("Normalized enrichment score") +  -->
+<!--     ylab("-log10(Adjusted P value)") -->
+<!-- }) -->
+<!-- ``` -->
+
+<!-- ```{r, fig.width = 12, fig.height = 14} -->
+<!-- #| label: suppfig-volcano-normal -->
+<!-- plot_grid(volcano_plots_normal[["BLCA - (CESC + ESCA + HNSC + LUSC)/4"]] + ggtitle("Bladder vs rest"), -->
+<!--           volcano_plots_normal[["HNSC - (BLCA + CESC + ESCA + LUSC)/4"]] + ggtitle("H&N vs rest"), -->
+<!--           volcano_plots_normal[["ESCA - (BLCA + CESC + HNSC + LUSC)/4"]] + ggtitle("Esophagus vs rest"), -->
+<!--           volcano_plots_normal[["LUSC - (BLCA + CESC + ESCA + HNSC)/4"]] + ggtitle("Lung vs rest"), -->
+<!--           volcano_plots_normal[["CESC - (BLCA + ESCA + HNSC + LUSC)/4"]] + ggtitle("Cervix vs rest"), -->
+<!--           volcano_plots_normal[["LUSC - HNSC"]] + ggtitle("Lung vs H&N"), -->
+<!--           ncol = 2, labels = "auto") -->
+<!-- ``` -->
+
+
+
+
+
+
+
+
+
+

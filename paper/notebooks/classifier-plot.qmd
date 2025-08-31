@@ -1,0 +1,1015 @@
+---
+title: "Classifier plots"
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(cowplot)
+library(ComplexHeatmap)
+
+library(pROC)
+library(ungeviz)
+
+here::i_am("paper/notebooks/classifier-plot.qmd")
+```
+
+{{< include _data.qmd >}}
+
+# Classifier performance
+
+
+```{r}
+roc_data <- lapply(names(mcrocs), function(x) {
+  lapply(names(mcrocs[[x]]$rocs), function(ctype) {
+    roc <- mcrocs$test$rocs[[ctype]]
+    roc_data <- data.frame(
+      threshold = roc$thresholds,
+      fpr = 1 - roc$specificities,
+      tpr = roc$sensitivities,
+      cancer_type = ctype
+    )
+    return(roc_data)
+  }) %>%
+    bind_rows()
+})
+names(roc_data) <- names(mcrocs)
+
+auc_labels <- lapply(names(roc_data), function(x) {
+  sapply(unique(roc_data[[x]]$cancer_type), function(ctype) {
+    paste0(dplyr::recode(ctype, !!!cancertype_symbol_to_string), " (AUC=", round(mcrocs[[x]]$rocs[[ctype]]$auc, digits = 3), ")")
+  })
+})
+names(auc_labels) <- names(roc_data)
+```
+
+## Test
+
+
+
+```{r}
+mroc_test_curves <- ggplot(roc_data$test, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$test, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1), title = "Cancer Type")) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate") + 
+  ggplot_pub_theme
+
+contheat_test <- ggplot(contingency_tables$test, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n), size = 2) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggplot_pub_theme
+
+postmax_test_annotated <- proba_postmax$test %>% 
+  left_join(combined_metadata)
+
+umap_test_incorrect <- ggplot() + 
+  geom_point(data = postmax_test_annotated %>% dplyr::filter(cancer_type == max_pred), aes(x=UMAP1, y=UMAP2), alpha = 0.1) + 
+  geom_point(data = postmax_test_annotated %>% dplyr::filter(cancer_type != max_pred), aes(x=UMAP1, y=UMAP2, colour = cancer_type)) + 
+  theme_pubr(legend = "right") + 
+  scale_color_manual(values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+
+
+
+```
+
+```{r, fig.width = 12, fig.height = 8}
+#| label: fig-test-classifier
+#| fig-cap: "Performance of classifier on test set"
+#| fig-alt: "ROCs, contingency tables, and incorrect predictions for classifier on full test set, malignant only"
+plot_grid(mroc_test_curves, contheat_test, umap_test_incorrect, ncol = 2, labels = c("a", "b", "c"), rel_widths = c(0.6, 0.4))
+```
+
+## Jurmeister
+
+```{r}
+mroc_jurmeister_curves <- ggplot(roc_data$jurmeister, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$jurmeister, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate")
+
+contheat_jurmeister <- ggplot(contingency_tables$jurmeister, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  scale_fill_distiller(palette = "Spectral") + 
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE)
+
+postmax_jurmeister_annotated <- proba_postmax$jurmeister %>% 
+  left_join(combined_metadata)
+
+umap_jurmeister_incorrect <- ggplot() + 
+  geom_point(data = postmax_jurmeister_annotated %>% dplyr::filter(cancer_type == max_pred), aes(x=UMAP1, y=UMAP2), alpha = 0.1) + 
+  geom_point(data = postmax_jurmeister_annotated %>% dplyr::filter(cancer_type != max_pred), aes(x=UMAP1, y=UMAP2, colour = cancer_type)) + 
+  theme_pubr(legend = "right") + 
+  scale_color_manual(values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+```{r, fig.width = 12, fig.height = 8}
+#| label: fig-jurmeister-classifier
+#| fig-cap: "Performance of classifier on Jurmeister set"
+#| fig-alt: "ROCs, contingency tables, and incorrect predictions for classifier on Jurmeister set, malignant only, training on NO Jurmeister data (i.e. completely held out) in case of batch effects"
+plot_grid(mroc_jurmeister_curves, contheat_jurmeister, umap_jurmeister_incorrect, ncol = 2, labels = c("a", "b", "c"), rel_widths = c(0.6, 0.4))
+```
+
+## Normal
+
+```{r}
+mroc_normal_curves <- ggplot(roc_data$normal, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$normal, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1), title = "Cancer Type")) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate") + 
+  ggplot_pub_theme
+
+contheat_normal <- ggplot(contingency_tables$normal, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n), size = 2) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggplot_pub_theme
+
+postmax_normal_annotated <- proba_postmax$normal %>% 
+  left_join(combined_metadata)
+
+umap_normal_incorrect <- ggplot() + 
+  geom_point(data = postmax_normal_annotated %>% dplyr::filter(cancer_type == max_pred), aes(x=UMAP1, y=UMAP2), alpha = 0.1) + 
+  geom_point(data = postmax_normal_annotated %>% dplyr::filter(cancer_type != max_pred), aes(x=UMAP1, y=UMAP2, colour = cancer_type)) + 
+  theme_pubr(legend = "right") + 
+  scale_color_manual(values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+
+```{r, fig.width = 12, fig.height = 8}
+#| label: fig-normal-classifier
+#| fig-cap: "ROC curves for classifier on TCGA normal set"
+#| fig-alt: "ROCs, contingency tables, and incorrect predictions for classifier on TCGA normal set, training on only malignant data (i.e. normal data held out)"
+plot_grid(mroc_normal_curves, contheat_normal, umap_normal_incorrect, ncol = 2, labels = c("a", "b", "c"), rel_widths = c(0.6, 0.4))
+```
+
+
+## Metastases
+
+```{r}
+mroc_met_curves <- ggplot(roc_data$metastasis, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$normal, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1), title = "Cancer Type")) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate") + 
+  ggplot_pub_theme
+
+contheat_met <- ggplot(contingency_tables$metastasis, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n), size = 2) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggplot_pub_theme
+
+postmax_met_annotated <- proba_postmax$metastasis %>% 
+  left_join(combined_metadata)
+
+umap_met_incorrect <- ggplot() + 
+  geom_point(data = postmax_met_annotated %>% dplyr::filter(cancer_type == max_pred), aes(x=UMAP1, y=UMAP2), alpha = 0.1) + 
+  geom_point(data = postmax_met_annotated %>% dplyr::filter(cancer_type != max_pred), aes(x=UMAP1, y=UMAP2, colour = cancer_type)) + 
+  theme_pubr(legend = "right") + 
+  scale_color_manual(values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+
+```{r, fig.width = 12, fig.height = 8}
+plot_grid(mroc_met_curves, contheat_met, umap_met_incorrect, ncol = 2, labels = c("a", "b", "c"), rel_widths = c(0.6, 0.4))
+```
+
+```{r}
+contheat_vgh <- ggplot(contingency_tables$vgh, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  scale_fill_distiller(palette = "Spectral") + 
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE)
+
+#pdf(here::here("paper", "figures", "contingency_primary.pdf"), width = 14, height = 5)
+plot_grid(contheat_test + ggtitle(paste0("Test set (AUC=", format(mcrocs$test$auc, digits = 3, nsmall = 2), ")")) + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1)),
+          contheat_jurmeister + ggtitle(paste0("Jurmeister (AUC=", format(mcrocs$jurmeister$auc, digits = 3, nsmall = 2), ")")) + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1)),
+          contheat_vgh + ggtitle(paste0("Vancouver (AUC=", format(mcrocs$vgh$auc, digits = 3, nsmall = 2), ")")) + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1)), 
+          nrow = 1, labels = c("b", "c", "d"), rel_widths = c(0.35, 0.3, 0.35), align = "h")
+#dev.off()
+```
+
+```{r}
+contheat_jurmeister_vgh <- ggplot(contingency_tables$jurmeister_vgh, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n), size = 2) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggplot_pub_theme
+
+mroc_jurmeister_vgh_curves <- ggplot(roc_data$jurmeister_vgh, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$jurmeister_vgh, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1), title = "Cancer Type")) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate") + 
+  ggplot_pub_theme
+```
+
+```{r}
+tcga_tumor_purity_type <- "ESTIMATE"
+
+tcga_tumor_content_selected <- tcga_tumor_content %>%
+  dplyr::select(c("sample", "project", tcga_tumor_purity_type)) %>%
+  dplyr::rename("tumor content"=tcga_tumor_purity_type) %>%
+  dplyr::filter(!is.na(`tumor content`))
+
+vgh_tumor_content_selected <- vgh_tumor_content %>% 
+  dplyr::mutate(project = "Vancouver") %>%
+  dplyr::filter(!is.na(`tumor content`))
+
+tumor_content_selected <- tcga_tumor_content_selected %>%
+  bind_rows(vgh_tumor_content_selected)
+
+
+proba_primary_metastasis <- proba_dfs_long$test %>%
+  dplyr::filter(pred_cancer_type == cancer_type) %>%
+  bind_rows(
+    proba_dfs_long$metastasis %>%
+      dplyr::filter(pred_cancer_type == cancer_type)
+  ) %>%
+  bind_rows(
+    proba_dfs_long$vgh %>%
+      dplyr::filter(pred_cancer_type == cancer_type)
+  )
+
+proba_tumor_content <- tumor_content_selected %>%
+  dplyr::inner_join(proba_primary_metastasis) %>%
+  dplyr::mutate(
+    `Sample Type` = factor(`Sample Type`, levels = c("Primary Tumor", "Metastatic")),
+    cancer_type = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string)
+  )
+
+tumor_content_plot <- ggplot(proba_tumor_content, aes(x=`tumor content`, y=proba)) + 
+  geom_point(aes(colour = cancer_type, shape = project), alpha = 0.5) + 
+  theme_pubr() + 
+  facet_wrap(~ `Sample Type`) + 
+  xlab("Tumor content") + 
+  ylab("Probability (of correct class)") + 
+  scale_color_manual(values = site_color_map, name = "Cancer type") + 
+  scale_shape_discrete(name = "Project") + 
+  theme(legend.position = "right")
+
+pdf(here::here("paper", "figures", "metastasis_figure.pdf"), width = 13, height = 5)
+plot_grid(contheat_met + ggtitle(paste0("Test set (AUC=", format(mcrocs$metastasis$auc, digits = 3, nsmall = 2), ")")) + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1)), tumor_content_plot, nrow = 1, rel_widths = c(1, 2), labels = "auto")
+dev.off()
+```
+
+## Primaries: violin plots
+
+```{r}
+true_type_color_map <- c(
+  'Predicted'='#519E8A',
+  'Other'='#EE4266'
+)
+
+proba_dfs_long_labeled <- lapply(names(proba_dfs_long), function(x) {
+  proba_dfs_long_to_plot <- proba_dfs_long[[x]] %>%
+    dplyr::left_join(combined_metadata) %>%
+    dplyr::mutate(cancer_type_match=(pred_cancer_type == cancer_type),
+                  hpv_string=dplyr::case_match(replace_na(as.character(hpv), "Unk"), 
+                                               c("Unk") ~ "(HPV Unk)",
+                                               c("FALSE") ~ "(HPV-)",
+                                               c("TRUE") ~ "(HPV+)"),
+                  cancer_type_label=ifelse(cancer_type %in% c("CESC", "HNSC"),
+                                           paste0(cancer_type, " ", hpv_string),
+                                           cancer_type)
+    ) %>%
+    dplyr::mutate(
+      pred_cancer_type_string=dplyr::recode(pred_cancer_type, !!!cancertype_symbol_to_string),
+      true_type_string=dplyr::case_match(as.character(cancer_type_match), 
+                                         c("FALSE") ~ "Other",
+                                         c("TRUE") ~ "Predicted") %>%
+        factor(levels = c("Predicted", "Other"))
+    )
+  
+  roc_vals <- sapply(mcrocs[[x]]$rocs, function(site) {
+    format(round(as.numeric(site$auc), 3), nsmall = 3)
+  })
+  
+  # proba_dfs_long_to_plot <- proba_dfs_long_to_plot %>%
+  #   dplyr::mutate(pred_cancer_type_string = paste0(pred_cancer_type_string, " (AUC=", roc_vals[pred_cancer_type], ")"))
+  
+  return(proba_dfs_long_to_plot)
+})
+names(proba_dfs_long_labeled) <- names(proba_dfs_long)
+
+proba_dfs_long_labeled_combined <- proba_dfs_long_labeled %>%
+  bind_rows(.id = "cohort") %>%
+  dplyr::mutate(
+    cohort_string = dplyr::case_match(
+      cohort,
+      "test" ~ "Validation",
+      "jurmeister" ~ "Jurmeister",
+      "vgh" ~ "Vancouver"
+    )
+  )
+
+
+sensitivity_specificity_thresholds_test <- proba_dfs_long_labeled_combined %>% 
+  dplyr::filter(cohort == "test") %>%
+  dplyr::group_by(pred_cancer_type_string) %>%
+  dplyr::summarise(
+    `90% sensitivity` = quantile(proba[pred_cancer_type == cancer_type], probs = c(0.1)),
+    # `95% sensitivity` = quantile(proba[pred_cancer_type == cancer_type], probs = c(0.05)),
+    `90% specificity` = min(sapply(seq(0, 0.95, 0.01), function(x) {
+      if (length(which(cancer_type[proba >= x] == pred_cancer_type[proba >= x]))/length(which(proba >= x)) >= 0.90) {
+        x
+      } else {
+        1
+      }
+    }), na.rm = TRUE),
+    # `95% specificity` = min(sapply(seq(0, 0.95, 0.01), function(x) {
+    #   if (length(which(cancer_type[proba >= x] == pred_cancer_type[proba >= x]))/length(which(proba >= x)) >= 0.95) {
+    #     x
+    #   } else {
+    #     1
+    #   }
+    # }), na.rm = TRUE),
+  ) %>%
+  dplyr::ungroup() %>%
+  pivot_longer(cols = -c(pred_cancer_type_string), names_to = "Cutoff", values_to = "Threshold") %>%
+  dplyr::mutate(
+    type = str_extract(Cutoff, "(sensitivity|specificity)"),
+    Cutoff = factor(Cutoff, levels = c("90% sensitivity", "90% specificity"))
+  )
+
+proba_plot_test_cohort <- ggplot(proba_dfs_long_labeled_combined %>% dplyr::filter(cohort == "test"), aes(x=pred_cancer_type_string, y=proba)) + 
+  geom_violin(scale = "width") + 
+  geom_point(aes(fill = true_type_string), shape = 21, alpha = 0.2, position = position_jitter(width = 0.2, height = 0), size = 1) + 
+  theme_pubr() + 
+  ylab("Confidence") +
+  xlab("Predicted Site") +
+  coord_flip() + 
+  scale_fill_manual(values = true_type_color_map) + 
+  guides(colour = guide_legend(title = "Threshold", override.aes = list(alpha = 1), title.position = "top", title.hjust = 0.5), fill = FALSE) + 
+  ggtitle("Primary Tumors (Internal Test Cohort)") + 
+  theme(legend.position = "bottom") + 
+  geom_hpline(data = sensitivity_specificity_thresholds_test %>% dplyr::filter(type == "sensitivity"), aes(x=pred_cancer_type_string, y=Threshold, colour=Cutoff), position = position_nudge(x=.2), alpha = 0.6, width = 0.4) + 
+  geom_hpline(data = sensitivity_specificity_thresholds_test %>% dplyr::filter(type == "specificity"), aes(x=pred_cancer_type_string, y=Threshold, colour=Cutoff), position = position_nudge(x=-.2), alpha = 0.6, width = 0.4) + 
+  scale_color_manual(values = sens_spec_color_map, breaks = names(sens_spec_color_map)) + 
+  ggplot_pub_theme
+
+proba_dfs_vgh_jurmeister <- proba_dfs_long_labeled_combined %>% dplyr::filter(cohort %in% c("jurmeister_vgh_toronto"))
+
+roc_vals_vgh_jurmeister <- sapply(mcrocs_vgh_and_jurmeister$rocs, function(site) {
+  format(round(as.numeric(site$auc), 3), nsmall = 3)
+})
+
+proba_dfs_vgh_jurmeister <- proba_dfs_vgh_jurmeister %>%
+  dplyr::mutate(pred_cancer_type_string = paste0(
+    dplyr::recode(pred_cancer_type, !!!cancertype_symbol_to_string))) %>%
+  dplyr::mutate(
+    cohort_string = dplyr::case_match(
+      project,
+      "Jurmeister (2019)" ~ "Jurmeister",
+      "Vancouver" ~ "Vancouver",
+      "Toronto" ~ "Toronto"
+    )
+  )
+    # " (AUC=", 
+    # roc_vals_vgh_jurmeister[pred_cancer_type], 
+    # ")"))
+
+cohort_shape_map_modified <- cohort_shape_map[c("Vancouver", "Jurmeister (2019)", "Toronto", "TCGA")]
+names(cohort_shape_map_modified)[2] <- "Jurmeister"
+
+proba_plot_jurmeister_vgh_cohorts <- ggplot(proba_dfs_vgh_jurmeister, aes(x=pred_cancer_type_string, y=proba)) + 
+  geom_violin(scale = "width") + 
+  geom_point(aes(fill = true_type_string, shape = cohort_string), alpha = 0.2, position = position_jitter(width = 0.2, height = 0), size = 1) + 
+  theme_pubr() + 
+  ylab("Confidence") +
+  xlab("Predicted Site") +
+  coord_flip() + 
+  scale_fill_manual(values = true_type_color_map) + 
+  scale_shape_manual(values = cohort_shape_map_modified) +
+  theme(legend.position = "bottom") + 
+  guides(fill = guide_legend(title = "True Site", override.aes = list(alpha = 1, shape=22), title.position = "top", title.hjust = 0.5),
+         shape = guide_legend(title = "Cohort", override.aes = list(alpha = 1), title.position = "top", title.hjust = 0.5)) + 
+  ggtitle("Primary Tumors (External Test Cohort)") + 
+  ggplot_pub_theme
+
+site_match_legend <- get_legend(proba_plot_jurmeister_vgh_cohorts)
+threshold_legend <- get_legend(proba_plot_test_cohort)
+
+proba_plot_jurmeister_vgh_cohorts <- proba_plot_jurmeister_vgh_cohorts + theme(legend.position = "none")
+proba_plot_test_cohort <- proba_plot_test_cohort + theme(legend.position = "none")
+```
+
+
+
+```{r, fig.width = 17, fig.height = 10}
+pdf(here::here("paper", "figures", "violin_primary_4.pdf"), width = 11, height = 6.6)
+plot_grid(
+  plot_grid(contheat_test, mroc_test_curves, proba_plot_test_cohort, rel_widths = c(0.25, 0.35, 0.3), 
+            labels = c("A", "B", "C"), nrow = 1), 
+  plot_grid(NULL, threshold_legend, rel_widths = c(0.8, 0.3), nrow = 1), 
+  plot_grid(contheat_jurmeister_vgh, mroc_jurmeister_vgh_curves, proba_plot_jurmeister_vgh_cohorts, rel_widths = c(0.25, 0.35, 0.3),
+            labels = c("D", "E", "F"), nrow = 1),
+  plot_grid(NULL, site_match_legend, rel_widths = c(0.7, 0.4), nrow = 1),
+  nrow = 4, rel_heights = c(1, 0.2, 1, 0.2)
+)
+dev.off()
+```
+
+## Contingency tables at various thresholds
+
+```{r}
+contingency_tables_60 <- lapply(proba_postmax, function(x) {
+  generate_contingency_table(x, threshold = 0.6)
+})
+
+contingency_tables_70 <- lapply(proba_postmax, function(x) {
+  generate_contingency_table(x, threshold = 0.7)
+})
+
+contingency_tables_80 <- lapply(proba_postmax, function(x) {
+  generate_contingency_table(x, threshold = 0.8)
+})
+
+contingency_tables_90 <- lapply(proba_postmax, function(x) {
+  generate_contingency_table(x, threshold = 0.9)
+})
+
+threshold_tables_test <- list(
+  '0.6'=contingency_tables_60$test, 
+  '0.7'=contingency_tables_70$test,
+  '0.8'=contingency_tables_80$test,
+  '0.9'=contingency_tables_90$test
+)
+
+contingency_heatmaps_test <- lapply(
+  names(threshold_tables_test), 
+  function(x) {
+    ttx <- threshold_tables_test[[x]]
+    num_correct <- (ttx %>% dplyr::filter(as.character(cancer_type) == as.character(max_pred)))$n %>% sum
+    num_classified <- (ttx %>% dplyr::filter(max_pred != "Unclassified"))$n %>% sum
+    num_unclassified <- (ttx %>% dplyr::filter(max_pred == "Unclassified"))$n %>% sum
+    num_total <- ttx$n %>% sum
+    
+    plot_string <- sprintf("Confidence threshold %s\n%i/%i correct (%.1f%%), %i unclassified (%.1f%%)", 
+                           x,
+                           num_correct, num_classified, num_correct/num_classified*100,
+                           num_unclassified, num_unclassified/num_total*100)
+    ttx <- ttx %>%
+      dplyr::filter(max_pred != "Unclassified")
+    
+    heat <- ggplot(ttx, aes(x=max_pred, y=cancer_type)) + 
+      geom_tile(aes(fill = prop)) + 
+      geom_text(aes(label = n), size = 2) +
+      theme_pubr(legend = "right") + 
+      xlab("Predicted label") + 
+      ylab("True label") + 
+      guides(fill = FALSE) + 
+      scale_fill_gradient(
+        low = "#FEF5EF",
+        high = "#C33149"
+      ) + 
+      ggtitle(plot_string) + 
+      theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 12)) + 
+      ggplot_pub_theme
+    return(heat)
+  })
+names(contingency_heatmaps_test) <- names(threshold_tables_test)
+
+```
+
+```{r}
+pdf(here::here("paper", "figures", "confidence_thresholds_performance_2.pdf"), width = 8, height = 8)
+plot_grid(contingency_heatmaps_test[[1]],
+          contingency_heatmaps_test[[2]],
+          contingency_heatmaps_test[[3]],
+          contingency_heatmaps_test[[4]],
+          nrow = 2, rel_heights = c(0.5, 0.5), labels = c("A", "B", "C", "D"))
+dev.off()
+```
+
+
+## Metastases: violin and tumor content plots
+
+```{r}
+proba_plot_met_cohort <- ggplot(proba_dfs_long_labeled_combined %>% 
+                                  dplyr::filter(cohort == "metastasis") %>%
+                                  dplyr::mutate(project_string = str_replace(project, " \\(.*", "")), aes(x=pred_cancer_type_string, y=proba)) + 
+  geom_violin(scale = "width") + 
+  geom_point(aes(fill = true_type_string, shape = project_string), alpha = 0.2, position = position_jitter(width = 0.2, height = 0), size = 1) + 
+  theme_pubr() + 
+  ylab("Confidence") +
+  xlab("Predicted Site") +
+  coord_flip() + 
+  scale_fill_manual(values = true_type_color_map) + 
+  scale_shape_manual(values = cohort_shape_map_modified) + 
+  theme(legend.position = "bottom") + 
+  ggtitle("Metastatic Tumors") + 
+  guides(fill = guide_legend(title = "True Site", override.aes = list(alpha = 1, shape=22), title.position = "top", title.hjust = 0.5),
+         shape = "none") + 
+  ggplot_pub_theme
+
+shape_legend_grob <- get_legend(proba_plot_met_cohort + 
+  guides(fill = "none",
+         shape = guide_legend(title = "Cohort", override.aes = list(alpha = 1), title.position = "top", title.hjust = 0.5)) + 
+  theme(legend.position = "bottom"))
+
+true_site_legend_grob <- get_legend(proba_plot_met_cohort)
+
+proba_plot_met_cohort <- proba_plot_met_cohort + 
+  theme(legend.position = "none")
+
+metastasis_tumor_content_plot <- ggplot(proba_tumor_content %>% dplyr::filter(`Sample Type` == "Metastatic"), aes(x=`tumor content`, y=proba)) + 
+  geom_point(aes(colour = cancer_type, shape = project), alpha = 1, size = 2) + 
+  theme_pubr() + 
+  xlab("Tumor purity") + 
+  ylab("Confidence") + 
+  scale_color_manual(values = site_color_map, name = "Cancer type") + 
+  scale_shape_manual(values = cohort_shape_map_modified) + 
+  guides(shape = "none", color = guide_legend(title.position = "top", title.hjust = 0.5)) + 
+  theme(legend.position = "bottom") + 
+  ggplot_pub_theme
+
+primary_site_legend_grob <- get_legend(metastasis_tumor_content_plot)
+```
+
+```{r, fig.width = 12, fig.height = 6}
+pdf(here::here("paper", "figures", "violin_metastasis_3.pdf"), width = 8, height = 6)
+plot_grid(plot_grid(contheat_met, mroc_met_curves, nrow = 1, rel_widths = c(0.7, 1), labels = c("A", "B")),
+          plot_grid(proba_plot_met_cohort + theme(legend.position = "none"), 
+                    metastasis_tumor_content_plot+ theme(legend.position = "none"), nrow = 1, labels = c("C", "D"), rel_widths = c(0.55, 0.45)), 
+          plot_grid(true_site_legend_grob, shape_legend_grob, primary_site_legend_grob, nrow = 1, rel_widths = c(3, 5, 6)),
+          nrow = 3, rel_heights = c(1, 1, 0.2))
+dev.off()
+```
+
+
+## Normal figure
+
+```{r, fig.width = 12, fig.height = 6}
+pdf(here::here("paper", "figures", "normal_2.pdf"), width = 8, height = 3)
+plot_grid(contheat_normal, mroc_normal_curves, nrow = 1, rel_widths = c(0.9, 1.0), labels = c("A", "B"))
+dev.off()
+```
+
+
+
+## ONT figure
+
+```{r}
+pog_ont_downsampling_stats <- pog_ont_downsampling_results %>%
+  dplyr::mutate(
+    correct = sum(conttable[as.character(conttable$cancer_type) == as.character(conttable$max_pred),]$n),
+    total = sum(conttable$n),
+    Accuracy = correct/total,
+    AUC=as.numeric(roc_auc$auc)
+  )
+
+pog_ont_downsampling_stats_long <- pog_ont_downsampling_stats %>%
+  dplyr::select(coverage, window_size, Accuracy, AUC) %>%
+  pivot_longer(cols = c("Accuracy", "AUC"), names_to = "Metric", values_to = "value")
+
+# Use window size of 50
+pog_ont_downsample_plot <- ggplot(pog_ont_downsampling_stats_long %>% dplyr::filter(window_size == 50), aes(x=coverage, y=value)) + 
+  geom_point(aes(colour=Metric)) + 
+  geom_line(aes(colour=Metric)) + 
+  theme_pubr() + 
+  scale_x_continuous(trans = "log10", breaks = c(0.1, 0.2, 0.5, 0.7, 1, 2, 3, 5, 10, 15)) + 
+  scale_y_continuous(breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1.0), limits = c(0, 1)) +
+  xlab("Coverage") + 
+  ylab("Performance") + 
+  scale_colour_manual(values = metric_color_map) + 
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggtitle("Nanopore (Discovery)") + 
+  ggplot_pub_theme
+
+pog_ont_downsample_plot
+```
+
+```{r}
+pog_ont_proba_mat <- proba_dfs$pog_ont %>%
+  dplyr::left_join(pog_ont_metadata %>% dplyr::select(sample, patient_id)) %>%
+  dplyr::select(-c(sample)) %>%
+  column_to_rownames("patient_id") %>%
+  as.matrix
+
+pog_sample_annotation <- pog_ont_metadata %>%
+  dplyr::mutate(`Cancer Type` = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string),
+                `Tumor Content` = tumour_content/100) %>%
+  dplyr::rename(`Sample Type` ="local_or_metastatic") %>%
+  dplyr::select(patient_id, `Cancer Type`, `Sample Type`, `Tumor Content`) %>%
+  column_to_rownames("patient_id")
+
+colnames(pog_ont_proba_mat) <- colnames(pog_ont_proba_mat) %>%
+  dplyr::recode(!!!cancertype_symbol_to_string)
+
+ra <- rowAnnotation(df = pog_sample_annotation[rownames(pog_ont_proba_mat),],
+                    annotation_height = 0.02,
+                    annotation_name_rot = 45,
+                    col = list(
+                      `Cancer Type`=site_color_map,
+                      `Sample Type`=local_or_metastatic_color_map,
+                      `Tumor Content`=circlize::colorRamp2(c(0.4, 1), c("#FFEECF", "#A17C6B"), space = "RGB")
+                    ),
+                    annotation_legend_param = list(
+                      `Tumor Content` = list(
+                        direction = "horizontal",
+                        labels_gp = gpar(fontsize = 8),
+                        title_gp = gpar(fontsize = 9, fontface = "bold")
+                      ),
+                      `Cancer Type` = list(
+                        labels_gp = gpar(fontsize = 8),
+                        title_gp = gpar(fontsize = 9, fontface = "bold")
+                      ),
+                      `Sample Type` = list(
+                        labels_gp = gpar(fontsize = 8),
+                        title_gp = gpar(fontsize = 9, fontface = "bold")
+                      )
+                    ),
+                    annotation_name_gp= gpar(fontsize = 8)
+)
+
+pog_ont_prob_heatmap <- Heatmap(pog_ont_proba_mat, 
+        cluster_rows = FALSE, 
+        cluster_columns = FALSE,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(sprintf("%.2f", pog_ont_proba_mat[i, j]), x, y, gp = gpar(fontsize = 7, col = "black"))
+        },
+        heatmap_legend_param = list(
+          title = "Confidence",
+          direction = "horizontal",
+          labels_gp = gpar(fontsize = 8),
+          title_gp = gpar(fontsize = 9, fontface = "bold")
+        ),
+        col = circlize::colorRamp2(c(0, 1), c("#E5EBEA", "#747572"), space = "RGB"),
+        right_annotation = ra,
+        row_names_side = "left",
+        row_names_gp = gpar(fontsize = 8),
+        column_names_side = "bottom", 
+        column_names_rot = 45, 
+        column_names_gp = gpar(fontsize = 8),
+        column_title = "Nanopore (Discovery)",
+        column_title_gp = gpar(fontsize = 11, fontface = "bold")
+        
+)
+
+pog_ont_prob_heatmap_grob <- grid::grid.grabExpr(draw(pog_ont_prob_heatmap, heatmap_legend_side = "bottom", annotation_legend_side="bottom", legend_grouping = "original", merge_legend = TRUE, align_heatmap_legend = "heatmap_center", padding = unit(c(5.5, 40, 5.5, 5.5), "pt")), width = 5, height = 5)
+```
+
+
+```{r}
+mroc_vghont_curves <- ggplot(roc_data$vgh_ont, aes(x=fpr, y=tpr)) + 
+  geom_line(aes(color = cancer_type), alpha = 0.8) +
+  theme_pubr(legend = "right") + 
+  scale_color_manual(labels = auc_labels$vgh_ont, values = cancertype_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1), title = "Cancer Type")) + 
+  xlab("False positive rate") + 
+  ylab("True positive rate") + 
+  ggtitle("Nanopore (Validation)") + 
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggplot_pub_theme
+
+contheat_vghont <- ggplot(contingency_tables$vgh_ont, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n), size = 2) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Nanopore (Validation)") + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggplot_pub_theme
+```
+
+
+```{r}
+pdf(here::here("paper", "figures", "ont_figure_4.pdf"), width = 10, height = 8.5)
+plot_grid(pog_ont_prob_heatmap_grob, pog_ont_downsample_plot,
+          contheat_vghont, mroc_vghont_curves,
+          labels = c("A", "B", "C", "D"), 
+          nrow = 2, rel_heights = c(0.55, 0.45), rel_widths = c(0.45, 0.55))
+dev.off()
+```
+
+```{r}
+contingency_tables_untrained_0.8 <- lapply(proba_postmax_untrained, function(x) {
+  generate_contingency_table(x, threshold = 0.8)
+})
+
+contingency_tables_untrained_0.9 <- lapply(proba_postmax_untrained, function(x) {
+  generate_contingency_table(x, threshold = 0.9)
+})
+
+contheat_vgh_untrained <- ggplot(contingency_tables_untrained$vgh, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Array") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contheat_vgh_untrained_0.8 <- ggplot(contingency_tables_untrained_0.8$vgh, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Array (Threshold = 0.8)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contheat_vgh_untrained_0.9 <- ggplot(contingency_tables_untrained_0.9$vgh, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Array (Threshold = 0.9)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contheat_vgh_ont_untrained <- ggplot(contingency_tables_untrained$vgh_ont, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Nanopore") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contheat_vgh_ont_untrained_0.8 <- ggplot(contingency_tables_untrained_0.8$vgh_ont, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Nanopore (Threshold = 0.8)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contheat_vgh_ont_untrained_0.9 <- ggplot(contingency_tables_untrained_0.9$vgh_ont, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Nanopore (Threshold = 0.9)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+pdf(here::here("paper", "figures", "untrained_cancer_type_contingencies_3.pdf"), width = 10, height = 6)
+plot_grid(contheat_vgh_untrained, contheat_vgh_untrained_0.8, contheat_vgh_untrained_0.9,
+          contheat_vgh_ont_untrained, contheat_vgh_ont_untrained_0.8, contheat_vgh_ont_untrained_0.9,
+          labels = c("AUTO"), 
+          nrow = 2, rel_heights = c(0.6, 0.3), rel_widths = c(1, 1, 1))
+dev.off()
+```
+
+## Presentation figures
+
+```{r}
+proba_postmax_untrained_merged <- bind_rows(
+  proba_postmax_untrained$vgh,
+  proba_postmax_untrained$vgh_ont
+)
+
+contingency_merged <- generate_contingency_table(proba_postmax_untrained_merged, threshold = 0)
+contingency_merged_0.8 <- generate_contingency_table(proba_postmax_untrained_merged, threshold = 0.8)
+contingency_merged_0.9 <- generate_contingency_table(proba_postmax_untrained_merged, threshold = 0.9)
+
+contingency_merged_plot <- ggplot(contingency_merged, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("All") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contingency_merged_0.8_plot <- ggplot(contingency_merged_0.8, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Threshold = 0.8") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+contingency_merged_0.9_plot <- ggplot(contingency_merged_0.9, aes(x=max_pred, y=cancer_type)) + 
+  geom_tile(aes(fill = prop)) + 
+  geom_text(aes(label = n)) +
+  theme_pubr(legend = "right") + 
+  xlab("Predicted label") + 
+  ylab("True label") + 
+  guides(fill = FALSE) + 
+  scale_fill_gradient(
+    low = "#FEF5EF",
+    high = "#C33149"
+  ) + 
+  ggtitle("Threshold = 0.9") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+pdf(here::here("scratch", "untrained_cancer_type_contingencies_merged.pdf"), width = 10, height = 4)
+plot_grid(contingency_merged_plot, contingency_merged_0.8_plot, contingency_merged_0.9_plot,
+          labels = c("AUTO"), 
+          nrow = 1, rel_widths = c(1, 1, 1))
+dev.off()
+```
+
+```{r}
+## ONLY FOR PRESENTATION
+# pdf(here::here("scratch/presentation_figures/validation_primary_tumors.pdf"), width = 5, height = 5)
+# contheat_presentation <- ggplot(contingency_tables$test %>% 
+#                                   mutate(cancer_type = dplyr::recode(cancer_type, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung'),
+#                                          max_pred = dplyr::recode(max_pred, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung')),
+#                                          aes(x=max_pred, y=cancer_type)) + 
+#   geom_tile(aes(fill = prop)) + 
+#   geom_text(aes(label = n), size = 5) +
+#   scale_fill_gradient(
+#     low = "#FEF5EF",
+#     high = "#C33149"
+#   ) +
+#   theme_pubr(legend = "right") + 
+#   xlab("Predicted") + 
+#   ylab("Actual") + 
+#   guides(fill = FALSE) + 
+#   theme(axis.title.x = element_text(size = 14, face = "bold"),
+#         axis.title.y = element_text(size = 14, face = "bold"),
+#         axis.text.x = element_text(angle = 45, hjust = 1),
+#         axis.text.y = element_text(angle = 45, hjust = 1))
+# contheat_presentation
+# dev.off()
+```
+
+```{r}
+# pdf(here::here("scratch/presentation_figures/validation_jurmeister.pdf"), width = 5, height = 5)
+# contheat_jurmeister_presentation <- ggplot(contingency_tables$jurmeister %>% 
+#                                              mutate(cancer_type = factor(cancer_type, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC')),
+#                                                     max_pred = factor(max_pred, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC'))) %>%
+#                                              complete(cancer_type, max_pred, fill = list(n = 0, prop = 0)) %>%
+#                                              mutate(cancer_type = dplyr::recode(cancer_type, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung'),
+#                                                     max_pred = dplyr::recode(max_pred, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung')),
+#                                            aes(x=max_pred, y=cancer_type)) + 
+#   geom_tile(aes(fill = prop)) + 
+#   geom_text(aes(label = n), size = 5) +
+#   scale_fill_gradient(
+#     low = "#FEF5EF",
+#     high = "#C33149"
+#   ) +
+#   theme_pubr(legend = "right") + 
+#   xlab("Predicted") + 
+#   ylab("Actual") + 
+#   guides(fill = FALSE) + 
+#   theme(axis.title.x = element_text(size = 14, face = "bold"),
+#         axis.title.y = element_text(size = 14, face = "bold"),
+#         axis.text.x = element_text(angle = 45, hjust = 1),
+#         axis.text.y = element_text(angle = 45, hjust = 1))
+# contheat_jurmeister_presentation
+# dev.off()
+```
+
+```{r}
+# pdf(here::here("scratch/presentation_figures/validation_normal.pdf"), width = 5, height = 5)
+# contheat_normal_presentation <- ggplot(contingency_tables$normal %>%
+#                                              mutate(cancer_type = factor(cancer_type, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC')),
+#                                                     max_pred = factor(max_pred, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC'))) %>%
+#                                              complete(cancer_type, max_pred, fill = list(n = 0, prop = 0)) %>%
+#                                              mutate(cancer_type = dplyr::recode(cancer_type, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung'),
+#                                                     max_pred = dplyr::recode(max_pred, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung')),
+#                                            aes(x=max_pred, y=cancer_type)) +
+#   geom_tile(aes(fill = prop)) +
+#   geom_text(aes(label = n), size = 5) +
+#   scale_fill_gradient(
+#     low = "#FEF5EF",
+#     high = "#C33149"
+#   ) +
+#   theme_pubr(legend = "right") +
+#   xlab("Predicted") +
+#   ylab("Actual") +
+#   guides(fill = FALSE) +
+#   theme(axis.title.x = element_text(size = 14, face = "bold"),
+#         axis.title.y = element_text(size = 14, face = "bold"),
+#         axis.text.x = element_text(angle = 45, hjust = 1),
+#         axis.text.y = element_text(angle = 45, hjust = 1))
+# contheat_normal_presentation
+# dev.off()
+```
+
+```{r}
+# pdf(here::here("scratch/presentation_figures/validation_metastasis.pdf"), width = 5, height = 5)
+# contheat_metastasis_presentation <- ggplot(contingency_tables$metastasis %>%
+#                                              mutate(cancer_type = factor(cancer_type, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC')),
+#                                                     max_pred = factor(max_pred, levels = c('BLCA', 'CESC', 'ESCA', 'HNSC', 'LUSC'))) %>%
+#                                              complete(cancer_type, max_pred, fill = list(n = 0, prop = 0)) %>%
+#                                              mutate(cancer_type = dplyr::recode(cancer_type, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung'),
+#                                                     max_pred = dplyr::recode(max_pred, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung')),
+#                                            aes(x=max_pred, y=cancer_type)) +
+#   geom_tile(aes(fill = prop)) +
+#   geom_text(aes(label = n), size = 5) +
+#   scale_fill_gradient(
+#     low = "#FEF5EF",
+#     high = "#C33149"
+#   ) +
+#   theme_pubr(legend = "right") +
+#   xlab("Predicted") +
+#   ylab("Actual") +
+#   guides(fill = FALSE) +
+#   theme(axis.title.x = element_text(size = 14, face = "bold"),
+#         axis.title.y = element_text(size = 14, face = "bold"),
+#         axis.text.x = element_text(angle = 45, hjust = 1),
+#         axis.text.y = element_text(angle = 45, hjust = 1))
+# contheat_metastasis_presentation
+# dev.off()
+```
+
+

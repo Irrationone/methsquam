@@ -1,0 +1,43 @@
+---
+title: "Cohort plot"
+author: "Allen Zhang"
+---
+
+```{r}
+library(tidyverse)
+library(ComplexHeatmap)
+
+here::i_am("paper/notebooks/cohort-plot.qmd")
+```
+
+{{< include _data.qmd >}}
+
+
+```{r}
+cohort_data <- combined_metadata %>%
+  dplyr::select(
+    project,
+    site,
+    hpv,
+    sample
+  ) %>%
+  tibble::column_to_rownames("sample")
+
+cohort_plot <- columnAnnotation(df = cohort_data %>% as.data.frame,
+                                col = list(
+                                  site=site_color_map,
+                                  project=project_color_map,
+                                  hpv=hpv_color_map
+                                )
+)
+
+cohort_track <- Heatmap(matrix(nc = nrow(cohort_data), nr = 0), 
+	top_annotation = cohort_plot)
+```
+
+```{r, fig.width = 10, fig.height = 5}
+#| label: fig-cohort-plot
+#| fig-cap: "Cohort overview"
+#| fig-alt: "An overall cohort figure."
+draw(cohort_track, annotation_legend_side = "bottom")
+```

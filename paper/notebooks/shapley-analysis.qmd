@@ -1,0 +1,345 @@
+---
+title: "Shapley analysis"
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(cowplot)
+library(ComplexHeatmap)
+
+library(ggrepel)
+
+here::i_am("paper/notebooks/shapley-analysis.qmd")
+```
+
+{{< include _data.qmd >}}
+
+## Shapley values
+
+```{r}
+shap_values_long_topx <- shap_values_long %>%
+  head(length(unique(shap_values_long)) * 20) %>%
+  dplyr::mutate(probe = factor(probe, levels = unique(probe)))
+
+ggplot(shap_values_long_topx, aes(y=probe)) + 
+  geom_col(aes(x=shap, fill=cancer_type)) + 
+  theme_pubr() + 
+  scale_fill_manual(values = cancertype_color_map) + 
+  scale_y_discrete(limits=rev) + 
+  xlab("mean(|shap|)")
+```
+
+
+```{r}
+num_probes_per_cancertype <- 50
+# Note that there are some duplicated probes between cancer types, e.g. if more than one cancer type finds a particular probe important
+
+shap_cancertype <- shap_values_long %>%
+  dplyr::group_by(cancer_type) %>%
+  dplyr::slice_max(shap, n = num_probes_per_cancertype) %>%
+  ungroup()
+
+mvshap_cpg_annotation <- shap_cancertype %>%
+  pivot_wider(id_cols = "probe", names_from = "cancer_type", values_from = "shap", values_fill = 0) %>%
+  column_to_rownames("probe")
+
+gene_labels <- (cpg_450k_metadata %>% column_to_rownames("probe"))[unique(shap_cancertype$probe),]$UCSC_RefGene_Name
+
+mvshap_ra <- rowAnnotation(df = mvshap_cpg_annotation, 
+                           annotation_width = 0.02)
+
+cancertype_probes <- shap_cancertype$probe %>% unique
+
+sample_annotation_cancer <- combined_metadata %>%
+  dplyr::left_join(methylation_hclust_df) %>%
+  dplyr::select(sample, site, project, `Sample Type`, hpv, ESTIMATE, CD8, Methylation, `ESCC subtype`, hclust, iCluster, DNA_methylation_cluster) %>%
+  dplyr::mutate(CD8=log(CD8+1e-3)) %>%
+  dplyr::filter(`Sample Type` %in% c("Primary Tumor", "Metastatic")) %>%
+  column_to_rownames("sample")
+
+ca <- columnAnnotation(df = sample_annotation_cancer, annotation_height = 0.02,
+                       col = list(
+                         site=site_color_map,
+                         `Sample Type`=sample_type_color_map,
+                         hpv=hpv_color_map,
+                         Methylation=methylation_color_map,
+                         hclust=hclust_color_map,
+                         `ESCC subtype`=escc_color_map,
+                         project=project_color_map
+                       )
+)
+
+betas_mvshap_heatmap <- Heatmap(betas_merged_sel[cancertype_probes,rownames(sample_annotation_cancer)],
+                        na_col = "gray",
+                        cluster_rows = TRUE,
+                        clustering_method_rows = "ward.D2",
+                        clustering_distance_rows = "spearman",
+                        cluster_columns = TRUE,
+                        clustering_method_columns = "ward.D2",
+                        clustering_distance_columns = "spearman",
+                        show_column_names = FALSE,
+                        show_row_names = FALSE, #row_labels = gene_labels,
+                        row_names_side = "left",
+                        top_annotation = ca) + mvshap_ra
+```
+
+
+```{r, fig.width = 20, fig.height = 12}
+#| label: suppfig-shapley-methyl-heatmap
+draw(betas_mvshap_heatmap, heatmap_legend_side = "right")
+```
+
+## Shapley values by CpG probe type
+
+```{r}
+cpg_450k_metadata <- ann450k %>%
+  as.data.frame() %>%
+  dplyr::select(Relation_to_Island, UCSC_RefGene_Name, UCSC_RefGene_Group, Regulatory_Feature_Group) %>%
+  rownames_to_column(var = "probe") %>%
+  dplyr::mutate(
+    region_type=ifelse(
+      str_detect(UCSC_RefGene_Group, "(TSS|1stExon|5\\'UTR)"),
+      "Promoter",
+      "Non-promoter"
+    )
+  )
+
+shap_values_total_annotated <- shap_values_total %>%
+  dplyr::left_join(cpg_450k_metadata)
+
+shap_probe_island_plot <- ggplot(shap_values_total_annotated, aes(x=Relation_to_Island, y=sum_shap)) + 
+  geom_violin(width = 0.5, draw_quantiles = c(0.5)) +
+  #geom_point(position = position_jitter(width = 0.2, height = 0), alpha = 0.01) + 
+  theme_pubr() + 
+  xlab("Relationship to CpG island") + 
+  ylab("sum(mean(|shap|))") + 
+  stat_compare_means(comparisons = list(c("Island", "N_Shelf"), c("Island", "N_Shore"),
+                                        c("Island", "OpenSea"), c("Island", "S_Shelf"),
+                                        c("Island", "S_Shore")))
+
+shap_probe_region_plot <- ggplot(shap_values_total_annotated, aes(x=region_type, y=sum_shap)) + 
+  geom_violin(width = 0.5, draw_quantiles = c(0.5)) +
+  #geom_point(position = position_jitter(width = 0.2, height = 0), alpha = 0.005) + 
+  theme_pubr() + 
+  xlab("Region type") + 
+  ylab("sum(mean(|shap|))") + 
+  #scale_y_log10() +
+  stat_compare_means()
+```
+
+```{r, fig.width = 10, fig.height = 5}
+#| label: suppfig-shapley-probe-characteristics
+plot_grid(shap_probe_island_plot, shap_probe_region_plot, ncol = 2, rel_widths = c(0.65, 0.35), labels = "auto")
+```
+
+
+```{r}
+## TODO: EXPLORE THE GENES, PATHWAY ENRICHMENT ANALYSIS OF THE PROBES/GENES IDENTIFIED BY L1 REGULARIZED MODEL
+## COULD TELL US MORE THAN WHAT IT PREVIOUSLY SHOWED
+# 
+# shap_values_no_abs_long
+# ## DIRECTIONALITY IS OPPOSITE from what you'd expect for logFC (remember, negative shap == lower probability of that class with higher beta value == opposite of logFC (where higher beta value == higher logFC))
+# 
+# test <- shap_values_no_abs_long %>%
+#   filter(cancer_type == "HNSC") %>%
+#   arrange(shap)
+# 
+# # test <- shap_values_long %>% 
+# #   dplyr::select(probe, sum_shap) %>%
+# #   dplyr::rename(shap=sum_shap) %>%
+# #   unique %>% 
+# #   arrange(-shap)
+# 
+# test_anno <- test %>% dplyr::left_join(cpg_450k_metadata)
+# 
+# 
+# ## BELOW DOESN'T REALLY DO ANYTHING USEFUL?
+# 
+# myRank <- test$shap
+# names(myRank) <- test$probe
+# 
+# primary_metadata <- combined_metadata %>%
+#   dplyr::filter(`Sample Type` == "Primary Tumor")
+# 
+# betas_cancer <- readRDS(here::here("results", "merged", "betas_merged.rds"))[,primary_metadata$sample]
+# 
+# # Reshape the phenotype data to a format suitable for mCSEA
+# pheno <- primary_metadata[,c("cancer_type", "Project ID"), drop=FALSE] %>% as.data.frame
+# rownames(pheno) <- primary_metadata$sample
+# 
+# # Run the mCSEA
+# dshap_probes <- mCSEATest(myRank,
+#                           betas_cancer,
+#                           pheno,
+#                           minCpGs=3,
+#                           regionsTypes = "promoters",
+#                           platform = "450k", scoreType = "pos")
+# # DOESN'T SEEM TO GET ANYTHING SIGNIFICANT
+# 
+# gst <- gometh(sig.cpg=(test %>% head(500))$probe, all.cpg=test$probe, collection = "KEGG", sig.genes = TRUE, genomic.features = c("TSS1500","TSS200","1stExon"))
+# 
+# 
+# ## THINK: HOW CAN WE RELATE THE SHAPLEY VALUE PROBES TO SOMETHING USEFUL? 
+# ## maybe we can look at how differentially methylated probes correlate with high Shapley probes? 
+# ## does it mark only a subset? 
+# 
+# 
+# # A) scatterplot of shapley vs logFC to show linear relationship; points colored by cancer type => high-SHAP probes are similar to probes identified by DM analysis
+# # i.e. 5 lines on one scatterplot
+# # B) distribution of shapley values 
+# 
+# # M values vs shap values, one data point per probe-cancer combination? 
+# ```
+# 
+# ```{r}
+```
+
+```{r}
+dmps_cancer_merged <- read_tsv(here::here("results", "diff_methyl", "dmps_cancer_merged.tsv"))
+
+shap_values_top <- shap_values_long %>%
+  group_by(cancer_type) %>%
+  slice_max(shap, n = 15) %>%
+  ungroup() %>%
+  dplyr::mutate(top=TRUE)
+
+shap_dm_merged <- shap_values_long %>%
+  dplyr::left_join(shap_values_top) %>%
+  dplyr::mutate(top=ifelse(is.na(top), FALSE, top)) %>%
+  dplyr::inner_join(dmps_cancer_merged %>% dplyr::mutate(cancer_type=dplyr::recode(coef_name, !!!cancertype_symbol_to_string))) %>%
+  dplyr::mutate(label = (shap > 3e-3)) #& abs(logFC) > 2))
+
+shap_dm_merged$gene_first <- sapply(strsplit(shap_dm_merged$UCSC_RefGene_Name, ";"), function(x) paste0(unique(x), collapse=","))
+shap_dm_merged$gene_first[is.na(shap_dm_merged$gene_first) | (shap_dm_merged$gene_first == "NA")] <- ""
+
+shap_dm_plot <- ggplot(shap_dm_merged, aes(x=logFC, y=shap, colour=(top & shap > 2e-3))) + 
+  geom_point(alpha = 0.2) + 
+  geom_text_repel(data = shap_dm_merged %>% filter(top & shap > 2e-3), aes(x=logFC, y=shap, label = gene_first), size = 2) + 
+  theme_pubr() + 
+  #scale_colour_manual(values = cancertype_color_map) + 
+  facet_wrap(~ cancer_type, scales = "free_y", nrow = 1) + 
+  geom_vline(xintercept = c(-2, 2), linetype = "dotted") + 
+  #geom_hline(yintercept = 2e-3, linetype = "dotted") + 
+  scale_colour_manual(values = c('FALSE' = '#F5DD90', 'TRUE'='#324376')) + 
+  guides(colour = FALSE) + 
+  xlab("logFC") + 
+  ylab("|SHAP|") + 
+  theme(strip.background = element_rect(fill = "white", color = "black", linetype = "dashed")) + 
+  ggplot_pub_theme
+```
+
+```{r, fig.width = 11, fig.height = 8}
+#| label: fig-shapley-dm-plot
+plot_grid(shap_dm_plot, shap_probe_island_plot, nrow=2, labels = "auto")
+```
+
+## Final figures
+
+```{r}
+shap_values_long_homeobox_labeled <- shap_values_long %>% 
+  dplyr::mutate(homeobox=(probe %in% homeobox_cpg_probes),
+                any_gene=(probe %in% gene_cpg_probes)) %>%
+  filter(any_gene) %>%
+  dplyr::mutate(homeobox = dplyr::recode(as.character(homeobox), "TRUE"="Homeobox", "FALSE" = "Other") %>% factor(levels = c("Homeobox", "Other")))
+
+# median_shaps <- shap_values_long_homeobox_labeled %>%
+#   group_by(cancer_type) %>%
+#   summarise(median_shap=median(shap))
+
+# shap_topx <- shap_values_long_homeobox_labeled %>%
+#   left_join(median_shaps) %>%
+#   group_by(cancer_type) %>% 
+#   slice_max(shap, n = 10000)
+
+# tmp1 <- shap_topx %>% filter(cancer_type == "CESC")
+# ggplot(tmp1, aes(x=probe, y=shap/median_shap)) + geom_bar(aes(fill = homeobox), stat = "identity", width = 1) + scale_x_discrete(limits = tmp1$probe) + theme_pubr() + theme(axis.text.x=element_blank(),
+#         axis.ticks.x=element_blank()) + scale_y_log10() + scale_fill_manual(values = c('FALSE' = '#FFFFFF', 'TRUE'='#000000'))
+
+# PUT DIFFERENTIAL METHYLATION PLOTS ON TOP OF THIS
+
+shap_homeobox_pvals <- compare_means(shap ~ homeobox, shap_values_long_homeobox_labeled, group.by = c("cancer_type"), method = "wilcox.test", p.adjust.method = "holm") %>%
+  dplyr::mutate(p.final = paste0("italic(P)==", p.format))
+
+#ggplot(shap_values_long_homeobox_labeled, aes(x=homeobox, y=shap)) + geom_boxplot() + scale_y_log10() + facet_wrap(~ cancer_type, scales = "free") + theme_pubr() + stat_compare_means()
+shap_homeobox_comparison <- ggplot(shap_values_long_homeobox_labeled, aes(x=homeobox, y=shap)) + 
+  geom_violin(width = 0.5, draw_quantiles = c(0.1, 0.5, 0.9)) + 
+  theme_pubr() + 
+  facet_wrap(~ cancer_type, scales = "free", nrow = 1) + 
+  scale_y_log10() + 
+  stat_pvalue_manual(data = shap_homeobox_pvals, label = "p.final", y.position = 0.5, size = 3, remove.bracket = TRUE, parse = TRUE) + 
+  xlab("Gene type") + 
+  ylab("|SHAP|")
+
+percentile_cutoffs <- c(1, 0.5, 0.1, 0.01, 1e-3)
+
+shap_combined_by_percentile <- lapply(percentile_cutoffs, function(cutoff) {
+  quants <- shap_values_long_homeobox_labeled %>% 
+    group_by(cancer_type) %>%
+    reframe(enframe(quantile(shap, 1-cutoff), "quantile", "quant_cutoff"))
+  
+  df <- shap_values_long_homeobox_labeled %>%
+    dplyr::left_join(quants) %>%
+    filter(shap >= quant_cutoff)
+  
+  return(df)
+}) %>% bind_rows() %>%
+  dplyr::mutate(quantile = factor(as.numeric(str_replace_all(quantile, "\\%", ""))/100))
+
+homeobox_percentile_plot <- shap_combined_by_percentile %>%
+  dplyr::count(cancer_type, homeobox, quantile) %>%
+  dplyr::group_by(cancer_type, quantile) %>%
+  dplyr::mutate(n = n/sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x=quantile, y=n, fill = homeobox)) +
+  geom_col() + 
+  facet_wrap(~ cancer_type, nrow = 1) + 
+  theme_pubr() + 
+  scale_fill_manual(values = homeobox_map) + 
+  xlab("|SHAP| percentile cutoff") + 
+  ylab("Proportion") + 
+  guides(fill = guide_legend(title = "Gene")) + 
+  theme(strip.background = element_rect(fill = "white", color = "black", linetype = "dashed"),
+        legend.position = "bottom") + 
+  ggplot_pub_theme
+```
+
+```{r, fig.width = 12, fig.height = 9}
+# pdf(here::here("paper", "figures", "model_interpretation.pdf"), width = 12, height = 9)
+# plot_grid(shap_dm_plot, shap_homeobox_comparison, nrow = 2, rel_heights = c(0.6, 0.4), labels = "auto")
+# dev.off()
+
+pdf(here::here("paper", "figures", "model_interpretation_3.pdf"), width = 8, height = 7)
+plot_grid(shap_dm_plot, homeobox_percentile_plot, nrow = 2, rel_heights = c(0.5, 0.5), labels = "AUTO")
+dev.off()
+```
+
+## Presentation plots
+
+```{r}
+shap_dm_merged_presentation <- shap_dm_merged %>%
+  mutate(cancer_type = dplyr::recode(cancer_type, 'BLCA'='Bladder', 'CESC'='Cervix', 'ESCA'='Esophagus', 'HNSC'='Head & neck', 'LUSC'='Lung'))
+
+shap_dm_plot_presentation <- ggplot(shap_dm_merged_presentation %>% filter(cancer_type %in% c("Bladder", "Cervix", "Lung")), aes(x=logFC, y=shap, colour=(top & shap > 2e-3))) + 
+  geom_point(alpha = 0.4) + 
+  geom_text_repel(data = shap_dm_merged_presentation %>% filter(top,
+                                                   shap > 2e-3,
+                                                   str_detect(gene_first, "(^HOX)|GATA3|PAX2|SOX2"), 
+                                                   cancer_type %in% c("Bladder", "Cervix", "Lung")), aes(x=logFC, y=shap, label = gene_first)) + 
+  #scale_colour_manual(values = cancertype_color_map) + 
+  facet_grid(~ cancer_type) + 
+  geom_vline(xintercept = c(-2, 2), linetype = "dotted") + 
+  #geom_hline(yintercept = 2e-3, linetype = "dotted") + 
+  guides(colour = FALSE) + 
+  xlab("Differential methylation") + 
+  ylab("Importance") +
+  theme_pubr() + 
+  theme(strip.background = element_rect(fill = "white", color = NA), 
+        strip.text = element_text(face = "bold", size = 12), 
+        panel.background = element_rect(fill = NA, color = "black"))
+
+pdf(here::here("scratch/presentation_figures/shapley_de_plot.pdf"), width = 7, height = 4)
+shap_dm_plot_presentation
+dev.off()
+```
+

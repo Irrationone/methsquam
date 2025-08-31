@@ -1,0 +1,117 @@
+---
+title: "Tables"
+---
+
+```{r}
+library(tidyverse)
+library(ComplexHeatmap)
+library(ggpubr)
+library(cowplot)
+library(YesSiR)
+
+here::i_am("paper/notebooks/tables.qmd")
+```
+
+```{r}
+tumor_array_samples <- metadata_merged_including_untrained %>%
+  dplyr::filter(`Sample Type` %in% c("Primary Tumor", "Metastatic")) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("TCGA-HNSC", "TCGA-CESC"),
+                             `Sample ID` %in% c(hnsc_viral_samples$sample_id,
+                                                cesc_viral_samples$sample_id),
+                             NA)
+  ) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("GSE124052"),
+                             ifelse(str_detect(hpv_status, "HPV"),
+                                    TRUE,
+                                    ifelse(str_detect(hpv_status, "Neg"),
+                                           FALSE,
+                                           hpv)),
+                             hpv
+  )) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("VGH_Naso"),
+                             ifelse(p16 == "positive",
+                                    TRUE,
+                                    ifelse(p16 == "negative",
+                                           FALSE,
+                                           NA)),
+                             hpv)) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("GSE95036"),
+                             ifelse(sample %in% c("H05.8088", "H05.8214", "LB08-0804", "LB08-0603", "LB05-0240", "LB09-0246"),
+                                    TRUE,
+                                    FALSE),
+                             hpv)) %>%
+  dplyr::mutate(
+    hpv = factor(ifelse(hpv, "Positive", "Negative"), levels = c("Positive", "Negative"))
+  ) %>%
+  dplyr::rename(Site=site,
+                Project=project,
+                `HPV status`=hpv) %>%
+  dplyr::select(sample, Site, Project, `HPV status`, Sex, tissue_or_organ_of_origin, cancer_type, `Sample Type`)
+
+normal_array_samples <- metadata_normal_merged %>%
+  dplyr::rename(Project=project) %>%
+  dplyr::mutate(Site = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string)) %>%
+  dplyr::select(sample, Site, Project, Sex, tissue_or_organ_of_origin)
+
+pog_ont_samples <- pog_ont_metadata %>% 
+  dplyr::filter(sample %in% c(proba_dfs$pog_ont$sample)) %>%
+  dplyr::mutate(Site = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string))
+
+vgh_ont_samples <- vgh_ont_metadata
+```
+
+```{r}
+library(officer)
+library(gtsummary)
+
+tumor_array_samples_public <- tumor_array_samples %>%
+  filter(!Project %in% c("Vancouver", "Toronto"))
+
+normal_array_samples_public <- normal_array_samples
+
+explanatory_variables <- c("Project", "Sample Type", "HPV status", "Sex")
+
+tumor_array_samples_table <- tumor_array_samples_public %>%
+  dplyr::select(c("Site", explanatory_variables)) %>%
+  dplyr::mutate(
+    Project = dplyr::case_match(Project,
+                                "Chen (2020)" ~ "GSE121930 (Chen 2020)",
+                                "Soares-Lima (2021)" ~ "GSE178212 (Soares-Lima 2021)",
+                                "Jurmeister (2019)" ~ "GSE124052 (Jurmeister 2019)",
+                                "Degli Esposti (2017)" ~ "GSE95036 (Degli Esposti 2017)",
+                                "Lim (2016)" ~ "GSE79556 (Lim 2016)",
+                                "TCGA" ~ "The Cancer Genome Atlas (TCGA)"
+                            )
+  ) %>%
+  summarizor(
+    by = "Site",
+    num_stats = "mean_sd",
+    overall_label = NULL,
+    hide_null_na = TRUE
+  )
+
+sect_properties <- prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    width = 8.3, height = 11.7
+  ),
+  type = "continuous",
+  page_margins = page_mar()
+)
+
+tumor_array_samples_table %>% as_flextable() %>%
+  save_as_docx(path = here::here("paper", "tables", "external_cohort_samples.docx"), pr_section = sect_properties)
+
+
+normal_array_samples_table <- normal_array_samples_public %>%
+  select(c("Site", setdiff(explanatory_variables, "HPV status", "Sample Type`"))) %>%
+  summarizor(
+    by = "Site",
+    num_stats = "mean_sd",
+    overall_label = NULL,
+    hide_null_na = TRUE
+  )
+
+normal_array_samples_table %>% as_flextable() %>%
+  save_as_docx(path = here::here("paper", "tables", "normal_samples.docx"), pr_section = sect_properties)
+```

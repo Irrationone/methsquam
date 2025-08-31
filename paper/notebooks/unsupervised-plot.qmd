@@ -1,0 +1,157 @@
+---
+title: "Unsupervised analysis"
+---
+
+```{r}
+library(tidyverse)
+library(ComplexHeatmap)
+library(ggpubr)
+library(cowplot)
+
+here::i_am("paper/notebooks/unsupervised-plot.qmd")
+```
+{{< include _data.qmd >}}
+
+
+
+```{r}
+cpg_annotation <- ann450k[match(rownames(betas_plot),ann450k$Name),
+                       c(12:19,24:ncol(ann450k))]
+cpg_annotation <- cpg_annotation %>%
+  as.data.frame() %>%
+  dplyr::select(Relation_to_Island)
+```
+
+```{r}
+# ra <- rowAnnotation(df = cpg_annotation[1:nprobes_to_plot,,drop=F], 
+#                     annotation_width = 0.02,
+#                     col = list(
+#                       Relation_to_Island=probe_color_map
+#                     )
+# )
+
+sample_annotation_clean <- sample_annotation %>%
+  dplyr::select(site, project, `Sample Type`, hpv) %>%
+  dplyr::rename(Site=site,
+                Project=project,
+                `HPV status`=hpv)
+
+#betas_plot_bigger <- betas_merged_sel[,colnames(betas_plot)]
+
+ca <- HeatmapAnnotation(df = sample_annotation_clean,
+                       col = list(
+                         Site=site_color_map,
+                         `HPV status`=hpv_color_map,
+                         `Sample Type`=sample_type_color_map,
+                         Project=project_color_map
+                       ),
+                       annotation_name_gp= gpar(fontsize = 8)
+)
+  
+
+beta_heatmap <- Heatmap(betas_plot,
+                        na_col = "gray",
+                        cluster_rows = TRUE,
+                        clustering_method_rows = "ward.D2",
+                        clustering_method_columns = "ward.D2",
+                        cluster_columns = TRUE,
+                        #column_split = sample_annotation$malignant %>% dplyr::recode(Cancer="Tumor"),
+                        show_column_names = FALSE,
+                        show_row_names = FALSE,
+                        top_annotation = ca, 
+                        heatmap_legend_param = list(
+                          title = expression(beta)
+                        ), use_raster = FALSE) #+ ra
+
+
+heatmap_plot <-grid::grid.grabExpr(draw(beta_heatmap, heatmap_legend_side = "bottom", annotation_legend_side="bottom", legend_grouping = "original", merge_legend = TRUE, align_heatmap_legend = "heatmap_center"), width = 8, height = 2)
+```
+
+```{r}
+combined_metadata_to_plot <- combined_metadata %>%
+  dplyr::rename(Primary = site,
+                HPV=hpv) %>%
+  dplyr::mutate(project2 = ifelse(project == "TCGA", `Project ID`, project)) %>%
+  dplyr::filter(`Sample Type` != "Solid Tissue Normal")
+
+p1 <- ggplot(combined_metadata_to_plot, aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=Primary), alpha = 0.5, size = 1) + 
+  theme_pubr() + 
+  scale_color_manual(values = site_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) + 
+  theme(legend.position = "none", plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggtitle("Primary Site") +
+  xlim(min(combined_metadata_to_plot$UMAP1)-0.2, max(combined_metadata_to_plot$UMAP1)+0.2) + 
+  ylim(min(combined_metadata_to_plot$UMAP2)-0.2, max(combined_metadata_to_plot$UMAP2)+0.2) + 
+  ggplot_pub_theme
+
+p2 <- ggplot(combined_metadata_to_plot %>% dplyr::filter(!is.na(HPV)), aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=HPV), alpha = 0.5, size = 1) + 
+  theme_pubr() + 
+  scale_color_manual(values = hpv_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) + 
+  theme(legend.position = "none", plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggtitle("HPV status") +
+  xlim(min(combined_metadata_to_plot$UMAP1)-0.2, max(combined_metadata_to_plot$UMAP1)+0.2) + 
+  ylim(min(combined_metadata_to_plot$UMAP2)-0.2, max(combined_metadata_to_plot$UMAP2)+0.2) + 
+  ggplot_pub_theme
+
+p3 <- ggplot(combined_metadata_to_plot, aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=`Sample Type`), alpha = 0.5, size = 1) + 
+  theme_pubr() + 
+  scale_color_manual(values = sample_type_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) + 
+  theme(legend.position = "none", plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggtitle("Sample Type") +
+  xlim(min(combined_metadata_to_plot$UMAP1)-0.2, max(combined_metadata_to_plot$UMAP1)+0.2) + 
+  ylim(min(combined_metadata_to_plot$UMAP2)-0.2, max(combined_metadata_to_plot$UMAP2)+0.2) + 
+  ggplot_pub_theme
+
+p4 <- ggplot(combined_metadata_to_plot, aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=project2), alpha = 0.5, size = 1) + 
+  theme_pubr() + 
+  guides(colour = guide_legend(title = "Project ID", override.aes = list(alpha = 1))) + 
+  theme(plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  ggtitle("Project") +
+  xlim(min(combined_metadata_to_plot$UMAP1)-0.2, max(combined_metadata_to_plot$UMAP1)+0.2) + 
+  ylim(min(combined_metadata_to_plot$UMAP2)-0.2, max(combined_metadata_to_plot$UMAP2)+0.2) + 
+  ggplot_pub_theme
+
+p4_legend <- get_legend(p4)
+```
+
+```{r, fig.width = 20, fig.height = 12}
+#| label: fig-unsupervised-methyl-heatmap
+#| fig-cap: "Heatmap of methylation beta values"
+#| fig-alt: "Methylation beta value heatmap"
+pdf(here::here("paper", "figures", "beta_heatmap_10.pdf"), width = 10, height = 8)
+plot_grid(heatmap_plot, plot_grid(p1, p3, p2, nrow = 1, labels = c("B", "C", "D")), nrow = 2, labels = c("A", ""), rel_heights = c(0.6, 0.4))
+dev.off()
+```
+
+```{r}
+pdf(here::here("paper", "figures", "reviewer_response_umap.pdf"), width = 8, height = 8)
+plot_grid(plot_grid(p1, p3, p2, p4 + theme(legend.position = "none"), nrow = 2, labels = c("A", "B", "C", "D")), p4_legend, nrow = 2, rel_heights = c(0.9, 0.1))
+dev.off()
+```
+
+```{r, fig.width=12, fig.height=6}
+#| label: fig-umap-methyl
+#| fig-cap: "UMAP of methylation beta values"
+#| fig-alt: "Methylation beta value UMAP"
+p1 <- ggplot(combined_metadata, aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=site), alpha = 0.5) + 
+  theme_pubr() + 
+  scale_color_manual(values = site_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+
+p2 <- ggplot(combined_metadata, aes(x=UMAP1, y=UMAP2)) + 
+  geom_point(aes(colour=`Sample Type`), alpha = 0.5) + 
+  theme_pubr() + 
+  scale_color_manual(values = sample_type_color_map) + 
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+
+plot_grid(p1, p2, ncol = 2)
+```
+
+

@@ -1,0 +1,737 @@
+
+
+```{r, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(here)
+library(readxl)
+library(flextable)
+library(pixiedust)
+
+library(pROC)
+
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+here::i_am("paper/notebooks/_data.qmd")
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+cancertype_color_map <- c(
+  'BLCA'='#A6D9F7',
+  'CESC'='#E0479E',
+  'ESCA'='#EA7317',
+  'HNSC'='#9593D9',
+  'LUSC'='#95A78D'
+)
+
+site_color_map <- c(
+  'Bladder'='#A6D9F7',
+  'Cervix'='#E0479E',
+  'Esophagus'='#EA7317',
+  'H&N'='#9593D9',
+  'Lung'='#95A78D'
+)
+
+project_color_map <- c(
+  'TCGA'='#324376',
+  'Chen (2020)'='#F76C5E',
+  'Jurmeister (2019)'='#F5DD90',
+  'Soares-Lima (2021)'='#F68E5F',
+  'Lim (2016)'='#5B5750',
+  'Degli Esposti (2017)'='#492C1D',
+  'Vancouver'='#A6D9F7',
+  'Toronto'='#CDEB8B'
+)
+
+hpv_color_map <- c(
+  'Positive'='#982649',
+  'Negative'='#001242'
+)
+
+sample_type_color_map <- c(
+  'Primary Tumor'='#FFD449',
+  'Metastatic'='#548C2F',
+  'Solid Tissue Normal'='#C9B7AD'
+)
+
+local_or_metastatic_color_map <- c(
+  'Local'='#FFD449',
+  'Metastatic'='#548C2F'
+)
+
+methylation_color_map <- c(
+  'CpG island hyper-methylated'='#61C9A8',
+  'hyper-methylated'='#A53860',
+  'normal-like'='#EEF36A',
+  'hypo-methylated'='#003249'
+)
+
+escc_color_map <- c(
+  'C1'='#C1F7DC',
+  'C2'='#BDA0BC',
+  'C3'='#824670'
+)
+
+hclust_color_map <- c(
+  "hypermethylated" = '#61C9A8',
+  "hypomethylated" = '#003249',
+  "normal-like" = '#EEF36A',
+  "hpv-associated" = '#A53860',
+  "bladder-like" = '#A6D9F7',
+  "normal"='#F5DD90',
+  "metastasis"='#E0479E'
+) 
+
+probe_color_map <- c(
+  'Island'='#000000',
+  'N_Shelf'='#B7B6C1',
+  'N_Shore'='#B7B6C1',
+  'S_Shelf'='#C3D350',
+  'S_Shore'='#C3D350',
+  'OpenSea'='#FFFFFF'
+)
+
+tumor_color_map <- c(
+  'Cancer'='#982649',
+  'Normal'='#A6D9F7'
+)
+
+cohort_shape_map <- c(
+  'TCGA'=21,
+  'Chen (2020)'=18,
+  'Jurmeister (2019)'=22,
+  'Soares-Lima (2021)'=8,
+  'Lim (2016)'=4,
+  'Degli Esposti (2017)'=3,
+  'Vancouver'=23,
+  'Toronto'=24
+)
+
+homeobox_map <- c(
+  'Other'='#4B3B40',
+  'Homeobox'='#9CDE9F'
+)
+
+metric_color_map <- c(
+  'Accuracy'='#950952',
+  'AUC'='#005C69'
+)
+
+sens_spec_color_map <- c(
+  '90% sensitivity'="#CEB0CA",
+  '95% sensitivity'='#49306B',
+  '90% specificity'='#FFC370',
+  '95% specificity'='#CC7700'
+)
+
+# The cancer types with training data
+trained_cancertypes <- c("BLCA", "CESC", "ESCA", "HNSC", "LUSC")
+
+cancertype_symbol_to_string <- list(BLCA="Bladder", CESC="Cervix", ESCA="Esophagus", HNSC="H&N", LUSC="Lung", Unclassified="Unclassified", VUSC="Vulva", VASC="Vagina", THYM="Thymus", CUSC="Skin", ANSC="Anus", PARSC="Parotid")
+
+ggplot_pub_theme <- theme(
+  axis.text = element_text(size = 7),
+  axis.title = element_text(size = 9),
+  plot.title = element_text(face = "bold", hjust = 0.5, size = 9),
+  legend.title = element_text(size = 7),
+  legend.text = element_text(size = 6)
+)
+```
+
+```{r}
+num_top_probes <- 10000
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+metadata_merged <- read_tsv(here::here("results", "merged", "metadata_merged.tsv"))
+metadata_normal_merged <- read_tsv(here::here("results", "merged", "metadata_merged_normal.tsv"))
+
+tcga_met_samples <- metadata_merged %>%
+  dplyr::filter(str_detect(`Project ID`, "^TCGA"),
+                `Sample Type` == "Metastatic")
+  
+
+recode_variables <- function(x) {
+  x %>%
+    dplyr::mutate(
+      site=dplyr::recode(cancer_type, !!!cancertype_symbol_to_string),
+      project_code=str_replace_all(`Project ID`, "(?<=TCGA).*", "")
+    ) %>%
+    dplyr::mutate(
+      project=dplyr::recode(project_code,
+                            'GSE121930,GSE121932'='Chen (2020)',
+                            'GSE124052'='Jurmeister (2019)',
+                            'GSE178212'='Soares-Lima (2021)',
+                            'GSE79556'='Lim (2016)',
+                            'GSE95036'='Degli Esposti (2017)',
+                            'VGH_Naso'='Vancouver',
+                            'IMPACT'='Toronto')
+    )
+}
+
+metadata_merged_including_untrained <- metadata_merged %>%
+  dplyr::filter(## Most likely incorrect clinical diagnosis. Toronto exclusions are prev Hx of SqCC
+                !sample %in% c("VS24-00656",
+                               "Toronto 23",
+                               "Toronto 66",
+                               "Toronto 263")) %>%
+  recode_variables()
+
+metadata_merged <- metadata_merged_including_untrained %>%
+  dplyr::filter(cancer_type %in% trained_cancertypes)
+
+metadata_normal_merged <- metadata_normal_merged %>%
+  dplyr::mutate(
+    year_of_birth = as.character(year_of_birth)
+  ) %>%
+  recode_variables()
+```
+
+```{r, warning=FALSE, include=FALSE}
+celltype_proportions <- read_tsv(here::here("data", "references", "for_cancers", "fileS2.txt"))
+
+celltype_proportions <- celltype_proportions %>%
+  dplyr::mutate(sample = `caseid`) %>%
+  dplyr::select(-c(`caseid`))# %>%
+  #dplyr::rename(cancer_cell = `malignant cancer cell`) 
+
+celltype_proportions <- celltype_proportions[!duplicated(celltype_proportions$sample),]
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+hnsc_viral_samples <- read_excel(here::here("data", "references", "mmc2", "VM_Supplemental_Table_4.xlsx"), sheet = "HNSC")
+cesc_viral_samples <- read_excel(here::here("data", "references", "mmc2", "VM_Supplemental_Table_4.xlsx"), sheet = "CESC")
+```
+
+
+
+```{r, warning=FALSE, include=FALSE}
+hnsc_exposure <- read_tsv(here::here("data", "TCGA_HNSC", "clinical", "exposure.tsv"))
+hnsc_exposure <- hnsc_exposure %>% 
+  dplyr::select(case_submitter_id, alcohol_history, cigarettes_per_day, exposure_duration, exposure_duration_years, exposure_type, pack_years_smoked, tobacco_smoking_status, years_smoked) %>%
+  dplyr::rename(sample=case_submitter_id) %>%
+  dplyr::mutate(pack_years_smoked = replace_na(as.numeric(pack_years_smoked), 0),
+                cigarettes_per_day = replace_na(as.numeric(cigarettes_per_day), 0),
+                years_smoked = replace_na(as.numeric(years_smoked), 0))
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+hnsc_tcga_clusters <- read_excel(here::here("data", "references", "nature14129-s2", "7.2.xlsx"), sheet = 1) %>%
+  dplyr::mutate(Barcode = str_replace_all(Barcode, "\\.", "-")) %>%
+  dplyr::rename(sample=Barcode)
+```
+
+
+
+```{r, warning=FALSE, include=FALSE}
+esca_tcga_clusters <- read_excel(here::here("data", "references", "tcga_esca_paper", "41586_2017_BFnature20805_MOESM91_ESM.xlsx"), sheet = 1, skip = 1) %>%
+  dplyr::rename(sample=barcode) %>%
+  dplyr::filter(`Histological Type` == "ESCC") %>%
+  dplyr::select(sample, `MLH1 epigenetically silenced`, `MLH1 methylation`, `EBV positive`, `ESCC subtype`) 
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+icluster_labels <- read_excel(here::here("data", "references", "hoadley_cell", "mmc6.xlsx"), skip = 1) %>%
+  dplyr::rename(sample=`Sample ID`) %>%
+  dplyr::mutate(iCluster = factor(iCluster))
+
+pancancer_methylation_labels <- read_excel(here::here("data", "references", "hoadley_cell", "mmc2.xlsx"), skip = 1) %>%
+  dplyr::rename(sample=`Sample ID`) %>%
+  dplyr::mutate(DNA_methylation_cluster = factor(DNA_methylation_cluster),
+                sample = str_replace_all(sample, "\\-[0-9]{2}[A-Z]$", "")) %>%
+  unique
+pancancer_methylation_labels <- pancancer_methylation_labels[!duplicated(pancancer_methylation_labels$sample),]
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+umap_df <- read_tsv(here::here("results", "merged", "umap.tsv"))
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+# Consider 'pure' samples to reduce variability: this should be tested at different values
+# This is applied only to TCGA samples, as cellularity is >70% for all of Jurmeister, and not known for the other two cohorts of HNSC
+cellularity_threshold <- 0.7
+
+combined_metadata <- metadata_merged %>%
+  dplyr::filter(ifelse(!is.na(ESTIMATE) & (`Sample Type` == "Primary Tumor"), ESTIMATE > cellularity_threshold, TRUE)) %>%
+  dplyr::left_join(celltype_proportions) %>%
+  dplyr::left_join(hnsc_exposure) %>%
+  dplyr::left_join(icluster_labels) %>%
+  dplyr::left_join(pancancer_methylation_labels) %>%
+  dplyr::left_join(hnsc_tcga_clusters) %>%
+  dplyr::left_join(esca_tcga_clusters) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("TCGA-HNSC", "TCGA-CESC"),
+                             `Sample ID` %in% c(hnsc_viral_samples$sample_id,
+                                                cesc_viral_samples$sample_id),
+                             NA)
+  ) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("GSE124052"),
+                             ifelse(str_detect(hpv_status, "HPV"),
+                                    TRUE,
+                                    ifelse(str_detect(hpv_status, "Neg"),
+                                           FALSE,
+                                           hpv)),
+                             hpv
+  )) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("VGH_Naso"),
+                             ifelse(p16 == "positive",
+                                    TRUE,
+                                    ifelse(p16 == "negative",
+                                           FALSE,
+                                           NA)),
+                             hpv)) %>%
+  dplyr::mutate(hpv = ifelse(`Project ID` %in% c("GSE95036"),
+                             ifelse(sample %in% c("H05.8088", "H05.8214", "LB08-0804", "LB08-0603", "LB05-0240", "LB09-0246"),
+                                    TRUE,
+                                    FALSE),
+                             hpv)) %>%
+  dplyr::left_join(umap_df) %>%
+  dplyr::mutate(
+    hpv = factor(ifelse(hpv, "Positive", "Negative"), levels = c("Positive", "Negative"))
+  )
+  
+```
+
+
+```{r}
+## TOTAL NUMBER OF SAMPLES
+(metadata_merged %>% dplyr::filter(`Sample Type` != "Solid Tissue Normal", project != "Vancouver"))$project %>% table
+
+(metadata_merged %>% dplyr::filter(`Sample Type` != "Solid Tissue Normal", project != "Vancouver"))$cancer_type %>% table
+
+(metadata_merged %>% dplyr::filter(`Sample Type` == "Solid Tissue Normal", project != "Vancouver"))$cancer_type %>% table
+
+(metadata_merged %>% dplyr::filter(project == "Vancouver"))$cancer_type %>% table
+
+(metadata_merged %>% dplyr::filter(project == "Vancouver"))$`Sample Type` %>% table
+
+with(combined_metadata %>% dplyr::filter(cancer_type == "HNSC"), table(tissue_or_organ_of_origin, hpv))
+
+with(combined_metadata %>% dplyr::filter(cancer_type == "CESC"), table(hpv))
+```
+
+```{r, warning=FALSE, include=FALSE}
+pure_metadata <- combined_metadata %>% 
+  dplyr::filter(`Sample Type` == "Primary Tumor")
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+ann450k <- minfi:::getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+
+cpg_450k_metadata <- ann450k %>%
+  as.data.frame() %>%
+  dplyr::select(Relation_to_Island, UCSC_RefGene_Name, UCSC_RefGene_Group, Regulatory_Feature_Group) %>%
+  rownames_to_column(var = "probe") %>%
+  dplyr::mutate(
+    region_type=ifelse(
+      str_detect(UCSC_RefGene_Group, "(TSS|1stExon|5\\'UTR)"),
+      "Promoter",
+      "Non-promoter"
+    )
+  )
+```
+
+```{r, warning=FALSE, include=FALSE}
+shap_values <- read_tsv(here::here("results", "classifier", "nn_shapley.tsv"))
+shap_values_no_abs <- read_tsv(here::here("results", "classifier", "nn_shapley_no_abs.tsv"))
+
+shap_values_long <- shap_values %>%
+  pivot_longer(cols = -c(probe), names_to = "cancer_type", values_to = "shap") %>%
+  dplyr::mutate(
+    cancer_type = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string)
+  )
+shap_values_no_abs_long <- shap_values_no_abs %>%
+  pivot_longer(cols = -c(probe), names_to = "cancer_type", values_to = "shap") %>%
+  dplyr::mutate(
+    cancer_type = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string)
+  )
+
+shap_values_total <- shap_values_long %>%
+  dplyr::group_by(probe) %>%
+  dplyr::summarise(sum_shap=sum(shap)) %>%
+  ungroup()
+shap_values_no_abs_total <- shap_values_no_abs_long %>%
+  dplyr::group_by(probe) %>%
+  dplyr::summarise(sum_shap=sum(shap)) %>%
+  ungroup()
+
+shap_values_long <- shap_values_long %>%
+  dplyr::left_join(shap_values_total) %>%
+  arrange(-sum_shap)
+shap_values_no_abs_long <- shap_values_no_abs_long %>%
+  dplyr::left_join(shap_values_no_abs_total) %>%
+  dplyr::left_join(shap_values_total %>% dplyr::rename(sum_abs_shap=sum_shap)) %>%
+  arrange(-sum_abs_shap)
+```
+
+
+```{r, warning=FALSE, include=FALSE}
+#variable_sites <- rownames(readRDS(here::here("results", "classifier", "train", "beta.rds")))
+variable_sites <- read_tsv(here::here("results", "classifier", "selected_probes.tsv"))$probe
+```
+
+```{r, warning=FALSE, include=FALSE}
+betas_merged_sel <- readRDS(here::here("results", "merged", "betas_merged.rds"))[variable_sites, metadata_merged$sample]
+#betas_normal_merged_sel <- readRDS(here::here("results", "merged", "betas_normal_merged.rds"))[variable_sites,]
+```
+
+```{r, warning=FALSE, include=FALSE}
+nprobes_to_plot <- 10000
+
+betas_plot <- betas_merged_sel[1:nprobes_to_plot, (combined_metadata %>% dplyr::filter(`Sample Type` != "Solid Tissue Normal"))$sample]
+
+cancer_metadata <- combined_metadata %>%
+  dplyr::filter(`Sample Type` %in% c("Primary Tumor", "Metastatic"))
+
+col_hclust <- hclust(dist(t(betas_merged_sel[1:nprobes_to_plot, cancer_metadata$sample]), method = "euclidean"), method = "ward.D2")
+methylation_hclust <- cutree(col_hclust, 5)
+methylation_hclust <- dplyr::recode(methylation_hclust,
+                                    "1"="normal-like",
+                                    "2"="hypomethylated",
+                                    "3"="hypermethylated",
+                                    "4"="hpv-associated",
+                                    "5"="bladder-like")
+methylation_hclust_df <- data.frame(sample=col_hclust$labels, hclust=methylation_hclust)
+```
+
+```{r}
+sample_annotation <- combined_metadata %>%
+  dplyr::left_join(methylation_hclust_df) %>%
+  dplyr::mutate(hclust=ifelse(is.na(hclust), `Sample Type`, hclust)) %>%
+  dplyr::mutate(
+    hclust=dplyr::recode(hclust, "Solid Tissue Normal"="normal"),
+    malignant=ifelse(`Sample Type` == "Solid Tissue Normal", "Normal", "Cancer")
+  ) %>%
+  dplyr::select(sample, site, project, hpv, ESTIMATE, CD8, Methylation, `ESCC subtype`, hclust, iCluster, DNA_methylation_cluster, `Sample Type`, malignant) %>%
+  dplyr::mutate(CD8=log(CD8+1e-3)) %>%
+  dplyr::filter(`Sample Type` != "Solid Tissue Normal") %>%
+  column_to_rownames("sample")
+```
+
+```{r}
+combined_metadata %>%
+  dplyr::left_join(methylation_hclust_df) %>%
+  dplyr::mutate(hclust=ifelse(is.na(hclust), `Sample Type`, hclust)) %>%
+  dplyr::mutate(
+    hclust=dplyr::recode(hclust, "Solid Tissue Normal"="normal"),
+    malignant=ifelse(`Sample Type` == "Solid Tissue Normal", "Normal", "Cancer")
+  ) %>%
+  dplyr::mutate(CD8=log(CD8+1e-3)) %>%
+  dplyr::filter(cancer_type == "HNSC") %>%
+  with(., table(tissue_or_organ_of_origin, Methylation))
+```
+
+```{r}
+pog_ont_metadata <- read_tsv(here::here("results", "POG_nanopore_450k", "metadata.tsv"))
+```
+
+```{r}
+vgh_tumor_content <- read_excel(here::here("data", "VGH_Naso", "clinical_data", "240420YuQi_originmatchedcases.xlsx"), sheet = 2)
+# vgh_tumor_content <- vgh_tumor_content %>%
+#   dplyr::select(case, `tumor content`) %>%
+#   dplyr::rename(sample=case) %>%
+#   dplyr::mutate(`tumor content` = `tumor content`/100)
+
+tcga_tumor_content <- combined_metadata %>%
+  dplyr::filter(!is.na(ESTIMATE) | !is.na(ABSOLUTE) | !is.na(IHC))
+
+vgh_ont_metadata <- read_excel(here::here("data", "VGH_ONT", "240829ONTsampleclinicaldata.xlsx")) %>%
+  dplyr::rename(sample = `Sample ID`)
+
+# vgh_ont_tumor_content <- vgh_ont_metadata %>% 
+#   dplyr::select(sample, tumor_content_slide)
+
+pog_ont_tumor_content <- pog_ont_metadata %>%
+  dplyr::select(sample, tumour_content)
+```
+
+```{r}
+vgh_final_tumor_content <- read_excel(here::here("paper", "tables", "241126supTable1.xlsx"), sheet = 1)
+
+vgh_final_tumor_content <- vgh_final_tumor_content %>%
+  dplyr::select(case, tumor_content_mean) %>%
+  dplyr::mutate(`tumor content` = tumor_content_mean/100) %>%
+  dplyr::select(-c(tumor_content_mean))
+
+vgh_tumor_content <- vgh_tumor_content %>%
+  dplyr::select(case) %>%
+  dplyr::left_join(vgh_final_tumor_content) %>%
+  dplyr::rename(sample=case)
+
+vgh_ont_tumor_content <- vgh_ont_metadata %>% 
+  dplyr::select(`path number`, sample) %>%
+  dplyr::rename(case=`path number`) %>%
+  dplyr::left_join(vgh_final_tumor_content)
+```
+
+
+```{r}
+cancer_type_df <- combined_metadata |> 
+  dplyr::select(sample, cancer_type, site, `Sample Type`) %>%
+  dplyr::mutate(input_type = "Array") %>%
+  bind_rows(
+    vgh_ont_metadata %>% 
+      dplyr::select(sample, cancer_type) %>%
+      dplyr::mutate(input_type = "ONT")
+  ) %>%
+  bind_rows(
+    pog_ont_metadata %>% 
+      dplyr::select(sample, cancer_type) %>%
+      dplyr::mutate(input_type = "ONT")
+  )
+
+classifier_result_prefix <- here::here("results", "classifier")
+
+proba_dfs <- list(
+  # no Jurmeister, no mets
+  'test'=read_tsv(file.path(classifier_result_prefix, "test_nn_proba.tsv")),
+  # normal
+  'normal'=read_tsv(file.path(classifier_result_prefix, "normal_nn_proba.tsv")),
+  # Jurmeister
+  'jurmeister'=read_tsv(file.path(classifier_result_prefix, "jurmeister_nn_proba.tsv")),
+  # VGH
+  'vgh'=read_tsv(file.path(classifier_result_prefix, "vgh_onlyTrained_nn_proba.tsv")),
+  # Jurmeister + VGH
+  'jurmeister_vgh_toronto'=bind_rows(read_tsv(file.path(classifier_result_prefix, "jurmeister_nn_proba.tsv")), 
+                             read_tsv(file.path(classifier_result_prefix, "vgh_onlyTrained_nn_proba.tsv")),
+                             read_tsv(file.path(classifier_result_prefix, "toronto_nn_proba.tsv"))),
+  # Toronto
+  #'toronto'=read_tsv(file.path(classifier_result_prefix, "toronto_nn_proba.tsv")),
+  # metastases
+  'metastasis'=read_tsv(file.path(classifier_result_prefix, "met_nn_proba.tsv")),
+  # POG ONT, full depth
+  'pog_ont'=read_tsv(file.path(classifier_result_prefix, "pog_ont_nn_proba.tsv")),
+  # VGH ONT, full depth
+  'vgh_ont'=read_tsv(file.path(classifier_result_prefix, "vgh_ont_nn_proba.tsv"))
+)
+
+# Move this sample over to the met table from the primary VGH/Jurmeister/Toronto table: VS24-02743
+
+proba_dfs_long <- lapply(proba_dfs, function(x) {
+  x |> 
+    pivot_longer(cols = -sample, names_to = "pred_cancer_type", values_to = "proba") |> 
+    inner_join(cancer_type_df)
+})
+
+# Remove metastatic samples
+proba_dfs_long$jurmeister <- proba_dfs_long$jurmeister %>% dplyr::filter(`Sample Type` == "Primary Tumor")
+proba_dfs_long$vgh <- proba_dfs_long$vgh %>% dplyr::filter(`Sample Type` == "Primary Tumor")
+proba_dfs_long$jurmeister_vgh_toronto <- proba_dfs_long$jurmeister_vgh_toronto %>% dplyr::filter(`Sample Type` == "Primary Tumor")
+
+
+cancertype_vgh_df <- metadata_merged_including_untrained %>%
+  dplyr::filter(`Project ID` == "VGH_Naso") %>%
+  dplyr::select(sample, cancer_type, site, `Sample Type`) %>%
+  dplyr::mutate(input_type = "Array") %>%
+  bind_rows(
+    vgh_ont_metadata %>% 
+      dplyr::select(sample, cancer_type) %>%
+      dplyr::mutate(input_type = "ONT")
+  )
+
+proba_untrained_dfs <- list(
+  'vgh'=read_tsv(file.path(classifier_result_prefix, "vgh_untrained_nn_proba.tsv")),
+  'vgh_ont'=read_tsv(file.path(classifier_result_prefix, "vgh_ont_untrained_proba.tsv"))
+)
+
+proba_untrained_dfs_long <- lapply(proba_untrained_dfs, function(x) {
+  x |> 
+    pivot_longer(cols = -sample, names_to = "pred_cancer_type", values_to = "proba") |> 
+    inner_join(cancertype_vgh_df)
+})
+```
+
+
+```{r}
+generate_auc_and_roc_curves <- function(df) {
+  df <- df |> 
+    pivot_wider(id_cols = c("sample", "cancer_type", "site"), names_from = "pred_cancer_type", values_from = "proba")
+  mat <- df %>% 
+    dplyr::select(-c(sample, cancer_type, site)) %>%
+    as.matrix
+  mcr <- multiclass.roc(response = df$cancer_type, predictor = mat)
+  
+  roc_curves <- lapply(unique(df$cancer_type), function(ctype) {
+    df$binary_class <- (df$cancer_type == ctype)
+    df$selected_class <- df[[ctype]]
+    roc(df, response = binary_class, predictor = selected_class)
+  })
+  names(roc_curves) <- unique(df$cancer_type)
+  
+  return(list(
+    auc=mcr$auc,
+    rocs=roc_curves
+  ))
+}
+
+mcrocs <- lapply(names(proba_dfs_long), function(test_group) {
+  generate_auc_and_roc_curves(proba_dfs_long[[test_group]])
+})
+names(mcrocs) <- names(proba_dfs_long)
+
+## RECOMPUTE ROCS FOR VGH + JURMEISTER TOGETHER
+vgh_jurmeister_df <- proba_dfs_long[c("vgh", "jurmeister")] %>% bind_rows() |> 
+  pivot_wider(id_cols = c("sample", "cancer_type", "site"), names_from = "pred_cancer_type", values_from = "proba")
+vgh_jurmeister_mat <- vgh_jurmeister_df %>% 
+  dplyr::select(-c(sample, cancer_type, site)) %>%
+  as.matrix
+vgh_jurmeister_mcr <- multiclass.roc(response = vgh_jurmeister_df$cancer_type, predictor = vgh_jurmeister_mat)
+
+
+## RECOMPUTE ROCS FOR VGH + JURMEISTER TOGETHER
+ont_df <- proba_dfs_long[c("pog_ont", "vgh_ont")] %>% bind_rows() |> 
+  pivot_wider(id_cols = c("sample", "cancer_type", "site"), names_from = "pred_cancer_type", values_from = "proba")
+ont_mat <- ont_df %>% 
+  dplyr::select(-c(sample, cancer_type, site)) %>%
+  as.matrix
+ont_mcr <- multiclass.roc(response = ont_df$cancer_type, predictor = ont_mat)
+
+vgh_jurmeister_roc_curves <- lapply(unique(vgh_jurmeister_df$cancer_type), function(ctype) {
+  vgh_jurmeister_df$binary_class <- (vgh_jurmeister_df$cancer_type == ctype)
+  vgh_jurmeister_df$selected_class <- vgh_jurmeister_df[[ctype]]
+  roc(vgh_jurmeister_df, response = binary_class, predictor = selected_class)
+})
+names(vgh_jurmeister_roc_curves) <- unique(vgh_jurmeister_df$cancer_type)
+  
+mcrocs_vgh_and_jurmeister <- list(
+  auc=vgh_jurmeister_mcr$auc,
+  rocs=vgh_jurmeister_roc_curves
+)
+
+proba_postmax <- lapply(proba_dfs_long, function(x) {
+  postmax <- x |>
+    dplyr::group_by(sample, site, cancer_type) |>
+    dplyr::summarise(max_proba = max(proba),
+                     max_pred = pred_cancer_type[which.max(proba)]) |>
+    dplyr::ungroup()
+  
+  return(postmax)
+})
+
+proba_postmax_untrained <- lapply(proba_untrained_dfs_long, function(x) {
+  postmax <- x |>
+    dplyr::group_by(sample, site, cancer_type) |>
+    dplyr::summarise(max_proba = max(proba),
+                     max_pred = pred_cancer_type[which.max(proba)]) |>
+    dplyr::ungroup()
+  
+  return(postmax)
+})
+
+generate_contingency_table <- function(x, threshold = 0) {
+  x <- x %>% 
+    dplyr::mutate(
+      max_pred = ifelse(max_proba < threshold, 
+                        "Unclassified",
+                        max_pred)
+    )
+  conttable_freq <- with(x, table(cancer_type, max_pred)) %>%
+    as.data.frame %>%
+    dplyr::rename(n=Freq)
+  
+  conttable_prop <- with(x, table(cancer_type, max_pred))
+  
+  conttable_prop <- (conttable_prop/rowSums(conttable_prop)) %>%
+    as.data.frame %>%
+    dplyr::rename(prop=Freq)
+  
+  conttable <- conttable_freq %>% 
+    left_join(conttable_prop) %>%
+    dplyr::mutate(
+      max_pred = dplyr::recode(max_pred, !!!cancertype_symbol_to_string),
+      cancer_type = dplyr::recode(cancer_type, !!!cancertype_symbol_to_string)
+    )
+  
+  return(conttable)
+}
+
+contingency_tables <- lapply(proba_postmax, function(x) {
+  generate_contingency_table(x)
+})
+
+contingency_tables_untrained <- lapply(proba_postmax_untrained, function(x) {
+  generate_contingency_table(x)
+})
+```
+
+```{r}
+pog_ont_downsampling_df <- read_tsv(file.path(classifier_result_prefix, "pog_ont_nn_proba_downsampled.tsv"))
+
+pog_ont_downsampling_results <- pog_ont_downsampling_df %>%
+  pivot_longer(cols = -c(sample, window_size, coverage), names_to = "pred_cancer_type", values_to = "proba") %>%
+  inner_join(cancer_type_df) %>%
+  ## Exclude lung cancer sample that is unclear primary, and exclude the misclassified sample on full coverage
+  dplyr::filter(!sample %in% c("40168_T_F94519", "F148374"),
+                coverage <= 15) %>%
+  dplyr::group_by(coverage, window_size) %>%
+  dplyr::do(
+    roc_auc=generate_auc_and_roc_curves(.),
+    probmax=. |>
+      dplyr::group_by(sample, site, cancer_type) |>
+      dplyr::summarise(max_proba = max(proba),
+                       max_pred = pred_cancer_type[which.max(proba)]) |>
+      dplyr::ungroup()
+  )
+
+pog_ont_downsampling_results$conttable <- lapply(pog_ont_downsampling_results$probmax, function(x) {
+  generate_contingency_table(x)
+})
+```
+
+
+```{r}
+## Homeobox genes
+
+homeobox_genes <- read_lines(here::here("data", "references", "holland_bmc_biol", "homeobox_genes.txt"))
+cpg_450k_metadata_separated <- cpg_450k_metadata %>%
+  separate_longer_delim(cols = c(UCSC_RefGene_Name, UCSC_RefGene_Group), delim = ";")
+cpg_450k_metadata_separated_homeobox_labeled <- cpg_450k_metadata_separated %>%
+  dplyr::mutate(
+    homeobox = UCSC_RefGene_Name %in% homeobox_genes
+  )
+homeobox_cpg_probes <- (cpg_450k_metadata_separated_homeobox_labeled %>% dplyr::filter(homeobox))$probe %>% unique
+gene_cpg_probes <- (cpg_450k_metadata_separated_homeobox_labeled %>% dplyr::filter(UCSC_RefGene_Name != ""))$probe %>% unique
+```
+
+
+
+## BELOW NOT BEING USED ANYMORE
+
+
+```{r}
+oog_metrics <- read_tsv(here::here("results", "classifier", "hold_one_out", "preds_merged.tsv"))
+oog_proba <- read_tsv(here::here("results", "classifier", "hold_one_out", "proba_merged.tsv"))
+```
+
+```{r}
+oog_roc_curves <- oog_metrics %>% 
+  dplyr::group_by(heldout_cancer_type, detector) %>%
+  dplyr::do(
+    roc_curve=roc(., response = y_true, predictor = y_pred)
+  )
+
+
+oog_roc_dfs <- oog_roc_curves %>% bind_cols(
+  oog_roc_curves %>%
+    dplyr::do(
+      roc_data = data.frame(
+        threshold = .$roc_curve$thresholds,
+        fpr = (1 - .$roc_curve$specificities),
+        tpr = .$roc_curve$sensitivities
+      ),
+      auc = as.numeric(.$roc_curve$auc)
+    ) %>%
+    ungroup() 
+)
+
+oog_roc_dfs_selected <- oog_roc_dfs %>%
+  dplyr::filter(detector == "Entropy") %>%
+  dplyr::mutate(auc = unlist(auc))
+```

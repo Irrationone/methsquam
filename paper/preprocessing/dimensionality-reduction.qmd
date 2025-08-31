@@ -1,0 +1,35 @@
+---
+title: "Dimensionality reduction"
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(umap)
+
+here::i_am("paper/preprocessing/dimensionality-reduction.qmd")
+```
+
+
+```{r}
+#variable_sites <- rownames(readRDS(here::here("results", "classifier", "train", "beta.rds")))
+variable_sites <- read_tsv(here::here("results", "classifier", "selected_probes.tsv"))$probe
+```
+
+```{r}
+betas_merged_sel <- readRDS(here::here("results", "merged", "betas_merged.rds"))[variable_sites,]
+#betas_normal_merged_sel <- readRDS(here::here("results", "merged", "betas_normal_merged.rds"))[variable_sites,]
+```
+
+```{r, eval = FALSE}
+umap_result <- umap(betas_merged_sel %>% t, metric = "pearson")
+```
+
+```{r, eval = FALSE}
+umap_df <- data.frame(umap_result$layout)
+colnames(umap_df) <- c("UMAP1", "UMAP2")
+umap_df <- umap_df %>%
+  rownames_to_column("sample")
+
+write_tsv(umap_df, file = here::here("results", "merged", "umap.tsv"))
+```
